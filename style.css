@@ -145,3 +145,6 @@ details.todo summary { cursor: pointer; font-size: 13px; text-transform: upperca
 .qbig small { font-size: 13px; font-weight: 500; color: var(--muted); }
 .qs { font-size: 12px; color: var(--muted); }
 .qa { display: flex; gap: 6px; margin-top: 8px; }
+/* "papier": warm cream version of the light-grey base map */
+.paper { filter: sepia(.45) saturate(1.35) hue-rotate(-8deg) brightness(1.05) contrast(.95); }
+#map, .leaflet-container { background: #f4efe4; }

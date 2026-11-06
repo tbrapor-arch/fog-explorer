@@ -33,11 +33,11 @@ let baseLabels;
 function setBase() {
   if (base) base.remove(); if (baseLabels) baseLabels.remove();
   const b = (BASES[ls.get('base')] || BASES.epure)();
-  base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: b.native || 19, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution, className: b.plain ? '' : 'basemap' }).addTo(map);
+  base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: b.native || 19, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution, className: b.plain ? 'paper' : 'basemap' }).addTo(map);
   base.bringToBack();
   if (b.labels) {
     if (!map.getPane('labels')) { map.createPane('labels').style.zIndex = 450; map.getPane('labels').style.pointerEvents = 'none'; }
-    baseLabels = L.tileLayer(b.labels, { pane: 'labels', maxZoom: 19, maxNativeZoom: b.native || 19, referrerPolicy: 'strict-origin' }).addTo(map);
+    baseLabels = L.tileLayer(b.labels, { pane: 'labels', maxZoom: 19, maxNativeZoom: b.native || 19, referrerPolicy: 'strict-origin', className: 'paper' }).addTo(map);
   }
 }
 setBase();
