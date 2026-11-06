@@ -118,12 +118,14 @@ export async function sync(cache = {}, onProgress = () => {}) {
     setFolder(f);
     files = await listAll(f);
   }
-  const tiles = files.filter(f => tileIdFromName(f.name) !== null && !/\.fwss$/i.test(f.name) && /\/sync\//i.test(f.path_lower));
-  const dirs = [...new Set(files.map(f => f.path_display.split('/').slice(0, -1).join('/')))].slice(0, 8);
+  const tiles = files.filter(f => tileIdFromName(f.name) !== null && !/\.fwss$/i.test(f.name)); // the app's live sync files, wherever they are
+  const byDir = new Map();
+  for (const f of files) { const d = f.path_display.split('/').slice(0, -1).join('/') || '/'; const e = byDir.get(d) || { n: 0, ex: [] }; e.n++; if (e.ex.length < 2) e.ex.push(f.name); byDir.set(d, e); }
+  const dirs = [...byDir.entries()].slice(0, 10).map(([d, e]) => `${d} (${e.n} : ${e.ex.join(', ')})`);
   if (tiles.length) {
     // nothing changed since last time: skip downloading and decoding
     if (cache.__kind === 'sync' && tiles.length === Object.keys(cache).filter(k => !k.startsWith('__')).length && tiles.every(f => cache[f.path_lower]?.hash === f.content_hash))
-      return { unchanged: true, cache, kind: 'sync', date: latest(tiles), folder: folder() };
+      return { unchanged: true, cache, kind: 'sync', date: latest(tiles), folder: folder(), dirs };
     const fog = new FogMap(), next = { __kind: 'sync' };
     let i = 0;
     for (const f of tiles) {
@@ -133,7 +135,7 @@ export async function sync(cache = {}, onProgress = () => {}) {
       next[f.path_lower] = c;
       try { fog.addTile(tileIdFromName(f.name), await inflate(c.raw)); } catch (e) {}
     }
-    if (fog.size) return { fog, cache: next, kind: 'sync', source: `synchro auto (${tiles.length} tuiles)`, date: latest(tiles), folder: folder(), nFiles: files.length };
+    if (fog.size) return { fog, cache: next, kind: 'sync', source: `synchro auto (${tiles.length} tuiles)`, date: latest(tiles), folder: folder(), nFiles: files.length, dirs };
   }
   const snaps = files.filter(f => /\.fwss$/i.test(f.name)).sort((a, b) => b.server_modified.localeCompare(a.server_modified));
   if (!snaps.length) throw new Error(`Rien trouvé dans « ${folder()} » : ni dossier Sync, ni snapshot .fwss. Active la synchro Dropbox dans Fog of World, ou envoie un snapshot sur Dropbox.`);

@@ -895,7 +895,7 @@ async function syncDropbox() {
     }
     const when = new Date(r.date).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
     $('#dbxStatus').innerHTML = r.kind === 'sync'
-      ? `Connecté · <b>synchro automatique active</b> : je lis le dossier Sync de Fog of World (dernière modification ${when}).`
+      ? `Connecté · <b>synchro automatique active</b> : je lis les fichiers de synchro de Fog of World (dernière modification ${when}).<br><small>Dossiers vus : ${(r.dirs || []).map(esc).join(' · ')}</small>`
       : `Connecté · <b>synchro automatique pas encore active</b> : je n'ai trouvé que des snapshots manuels dans « ${esc(r.folder)} » (dernier : ${when}). Active la synchro Dropbox dans Fog of World (onglet nuage) pour que tout se mette à jour seul.<br><small>Dossiers vus : ${(r.dirs || []).map(esc).join(' · ')}</small>`;
     ls.set('dbxLast', $('#dbxStatus').innerHTML);
     if (!r.unchanged) toast(r.kind === 'sync' ? 'Nouvelles traces reçues (synchro auto Dropbox).' : 'Traces chargées depuis le dernier snapshot Dropbox.');
