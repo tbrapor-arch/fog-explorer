@@ -33,6 +33,31 @@ export async function fetchWays(bbox, signal) {
   throw new Error("Impossible de charger les rues d'OpenStreetMap (" + (lastErr?.message || 'réseau') + '). Réessaie dans une minute.');
 }
 
+// Rail and metro stations around an area (RER, Transilien, métro, tram)
+export async function fetchStations([s, w, n, e]) {
+  const bb = `${s.toFixed(4)},${w.toFixed(4)},${n.toFixed(4)},${e.toFixed(4)}`;
+  const q = `[out:json][timeout:40];(node["railway"~"^(station|halt)$"](${bb});node["railway"="tram_stop"]["name"](${bb}););out body qt;`;
+  let last;
+  for (const url of OVERPASS) {
+    try {
+      const r = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+      if (!r.ok) throw new Error('Overpass ' + r.status);
+      const seen = new Map();
+      for (const el of (await r.json()).elements) {
+        const name = el.tags?.name; if (!name) continue;
+        const t = el.tags;
+        const kind = t.railway === 'tram_stop' || t.station === 'light_rail' ? 'tram' : t.station === 'subway' ? 'métro' : 'train / RER';
+        const k = name + '|' + Math.round(el.lat * 200) + '|' + Math.round(el.lon * 200);
+        const prev = seen.get(k);
+        if (!prev) seen.set(k, { name, lon: el.lon, lat: el.lat, kind });
+        else if (!prev.kind.includes(kind)) prev.kind += ', ' + kind;
+      }
+      return [...seen.values()];
+    } catch (e) { last = e; }
+  }
+  throw new Error('Gares indisponibles pour le moment (' + (last?.message || 'réseau') + ').');
+}
+
 export function distM(lon1, lat1, lon2, lat2) {
   const R = 6371008.8, r = Math.PI / 180;
   const dLat = (lat2 - lat1) * r, dLon = (lon2 - lon1) * r;

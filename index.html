@@ -44,6 +44,8 @@
     </div>
     <button id="viewHere" class="btn ghost small">Analyser la zone affichée</button>
     <div id="communeOut"></div>
+    <h3>Ma conquête de l'Île-de-France</h3>
+    <div id="conquest"><button id="conquestBtn" class="btn">Carte de mes communes</button></div>
   </div>
 
   <!-- ROUTE -->
@@ -51,12 +53,14 @@
     <div class="seg" role="radiogroup" aria-label="Type d'itinéraire">
       <button id="modeAB" class="on" role="radio" aria-checked="true">De A à B</button>
       <button id="modeLoop" role="radio" aria-checked="false">Boucle</button>
+      <button id="modeCom" role="radio" aria-checked="false">Cocher une commune</button>
     </div>
     <div class="field">
       <label for="fromQ">Départ</label>
       <div class="row">
         <input id="fromQ" type="search" placeholder="Adresse" autocomplete="off">
         <button class="btn ghost small" data-gps="from" title="Ma position">GPS</button>
+        <button class="btn ghost small" data-station="from" title="Partir d'une gare">Gare</button>
         <button class="btn ghost small" data-pick="from" title="Toucher la carte">Carte</button>
       </div>
       <ul class="suggest" data-for="fromQ" hidden></ul>
@@ -74,6 +78,18 @@
       <label for="loopKm">Distance de la boucle : <b id="loopKmV">5</b> km</label>
       <input id="loopKm" type="range" min="2" max="12" step="0.5" value="5">
     </div>
+    <div id="comField" hidden>
+      <p class="muted small">Commune à cocher : <b id="comName">aucune</b></p>
+      <div class="field">
+        <label for="comKm">Longueur max : <b id="comKmV">8</b> km</label>
+        <input id="comKm" type="range" min="3" max="15" step="0.5" value="8">
+      </div>
+      <div class="field">
+        <label for="comEnd">Arrivée</label>
+        <select id="comEnd"><option value="station">À une gare (RER, Transilien, métro, tram)</option><option value="start">Retour au départ</option></select>
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" id="charm" checked> Privilégier petites rues, passages et escaliers</label>
     <button id="go" class="btn primary">Trouver des rues nouvelles</button>
     <div id="routeOut"></div>
   </div>

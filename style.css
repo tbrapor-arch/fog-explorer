@@ -68,7 +68,7 @@ h3 { margin: 8px 0 -4px; font-size: 13px; text-transform: uppercase; letter-spac
 .field { display: flex; flex-direction: column; gap: 4px; position: relative; min-width: 0; }
 .field .row { align-items: stretch; } .field .row input { flex: 1; min-width: 0; }
 label { font-size: 13px; color: var(--muted); }
-input[type=search], input:not([type]) { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); font: inherit; }
+input[type=search], input:not([type]), select { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); font: inherit; }
 input:focus-visible, button:focus-visible, .btn:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
 input[type=range] { width: 100%; accent-color: var(--accent); }
 .check { display: flex; gap: 8px; align-items: center; color: var(--fg); font-size: 14px; }
@@ -124,3 +124,12 @@ code { font: 12px var(--mono); background: var(--panel); padding: 1px 5px; borde
 .confirm { margin: 0; padding: 10px; border: 1px solid var(--danger); border-radius: 10px; font-size: 14px; }
 .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: rot .8s linear infinite; }
 @keyframes rot { to { transform: rotate(360deg); } }
+
+.seg button { padding: 8px 4px; font-size: 13px; }
+.levels { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.levels div { background: var(--panel-2); border-radius: 10px; padding: 8px; display: grid; gap: 2px; }
+.levels b { font: 700 22px/1 var(--font); font-variant-numeric: tabular-nums; }
+.levels span { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+.levels i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
+:root { --lv0: #3a4352; --lv1: #6b5a2e; --lv2: #c98a1c; --lv3: #57c7e8; }
+@media (prefers-color-scheme: light) { :root { --lv0: #d7dde5; --lv1: #f3d9a4; --lv2: #e8a33a; --lv3: #1786b0; } }

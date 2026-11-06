@@ -2,6 +2,17 @@
 
 Compagnon web pour [Fog of World](https://fogofworld.app) : il lit tes traces et montre les rues que tu n'as pas encore parcourues, avec le pourcentage de rues explorées par commune (Île-de-France). Il calcule aussi des itinéraires à pied (A → B ou boucle) qui passent par le plus de rues nouvelles possible.
 
+## Fonctions
+
+- **Commune** : rues faites ou à découvrir, pourcentage, liste des rues à finir.
+- **Ma conquête de l'Île-de-France** : chaque commune est classée vierge, traversée, visitée (5 à 50 % des rues) ou conquise (au moins 50 %).
+- **Itinéraires** :
+  - de A à B (direct, équilibré, aventure) ;
+  - boucle autour d'un point ;
+  - **cocher une commune** : on part d'une gare ou de sa position, on ramasse le plus de rues nouvelles de la commune, puis on finit à une gare ou on revient au départ.
+- Option « charme » : petites rues, passages et escaliers privilégiés, grands axes évités.
+- Export GPX et Google Maps. Synchro Dropbox automatique.
+
 ## Confidentialité
 
 - **Ce dépôt ne contient aucune donnée personnelle.** Seulement du code.

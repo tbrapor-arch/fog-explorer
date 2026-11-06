@@ -1,6 +1,6 @@
 import { FogMap, fogFromSnapshot, WORLD } from './fog.js';
-import { fetchWays, buildNetwork, summarize, inGeometry, geomBbox, distM } from './streets.js';
-import { Graph, routesAB, routesLoop, toGPX } from './route.js';
+import { fetchWays, fetchStations, buildNetwork, summarize, inGeometry, geomBbox, distM } from './streets.js';
+import { Graph, routesAB, routesLoop, routeCommune, toGPX } from './route.js';
 import { idbGet, idbSet, wipeAll, ls } from './store.js';
 import * as dbx from './dropbox.js';
 
@@ -66,6 +66,14 @@ const routeLayer = L.layerGroup().addTo(map);
 const markerLayer = L.layerGroup().addTo(map);
 const hlLayer = L.layerGroup().addTo(map);
 
+// fit bounds in the part of the map not covered by the panel
+function fit(bounds, maxZoom = 18) {
+  const phone = matchMedia('(max-width: 819px)').matches, sh = $('#sheet');
+  const opts = phone ? { paddingTopLeft: [20, 90], paddingBottomRight: [20, sh.classList.contains('min') ? 110 : sh.offsetHeight + 16] }
+    : { paddingTopLeft: [410, 30], paddingBottomRight: [30, 30] };
+  map.fitBounds(bounds, { ...opts, maxZoom });
+}
+
 // ---------------- ui helpers ----------------
 function chip(text, state = '') { $('#chipText').textContent = text; $('#chip').className = 'chip ' + state; }
 let toastT;
@@ -80,7 +88,7 @@ function fogStatus(meta) {
   $('#dataStatus').textContent = `${fog.countPixels().toLocaleString('fr-FR')} pixels explorés (≈ ${(fog.countPixels() * 40 / 1e6).toFixed(1)} km²) · source : ${meta?.source || '?'}${d ? ' · ' + d : ''}`;
 }
 async function setFog(f, meta) {
-  fog = f; fogLayer.redraw(); fogStatus(meta);
+  fog = f; touched = null; fogLayer.redraw(); fogStatus(meta);
   await idbSet('fog', { ...f.serialize(), meta });
   if (current) analyze(current, false);
 }
@@ -132,14 +140,14 @@ function drawStreets(net, filter) {
   $('#legend').hidden = false;
 }
 
-async function analyze(area, fit = true) {
+async function analyze(area, fitView = true) {
   current = area;
   const out = $('#communeOut');
   if (!fog) { out.innerHTML = `<div class="empty"><b>Il manque tes traces.</b> Va dans l'onglet Données pour charger ton snapshot ou connecter Dropbox.</div>`; }
   outlineLayer.clearLayers(); hlLayer.clearLayers();
   if (area.geom) {
     const gj = L.geoJSON(area.geom, { style: { color: css('--fg'), weight: 2, opacity: .7, fill: false, dashArray: '6 4' }, interactive: false }).addTo(outlineLayer);
-    if (fit) map.fitBounds(gj.getBounds(), { padding: [20, 20] });
+    if (fitView) fit(gj.getBounds());
   }
   if (!fog) return;
   out.innerHTML = `<p class="muted"><span class="spin"></span> Chargement des rues de ${esc(area.name)}…</p>`;
@@ -151,7 +159,9 @@ async function analyze(area, fit = true) {
     const filter = area.geom ? midIn : null;
     netCurrent = { net, filter };
     drawStreets(net, filter);
-    renderStats(area, summarize(net, filter || (() => true)));
+    const st = summarize(net, filter || (() => true));
+    renderStats(area, st);
+    if (area.code) savePct(area.code, st.roads.total ? st.roads.done / st.roads.total : 0);
   } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   fogStatus(fogMeta);
 }
@@ -167,17 +177,129 @@ function renderStats(area, st) {
       <div class="kv"><span>${km(r.done)} faits sur ${km(r.total)}</span><span>reste ${km(r.total - r.done)}</span></div>
       <div class="kv"><span>Chemins et allées : ${pct(p.done, p.total)} %</span><span>${virgin} rues jamais foulées</span></div>
     </div>
+    ${area.geom ? `<button id="toCom" class="btn primary">Itinéraire pour cocher ${esc(area.name)}</button>` : ''}
     <h3>Rues à finir</h3>
     <ul class="list" id="todo">${todo.slice(0, 60).map((e, i) => `
       <li data-i="${i}"><span class="n">${esc(e.name)}</span><span class="v">${km(e.left)}</span>
       <span class="s">${e.done < 1 ? 'jamais parcourue' : pct(e.done, e.total) + ' % faite'} · ${km(e.total)} au total</span></li>`).join('')}</ul>`;
+  $('#toCom')?.addEventListener('click', () => { showTab('route'); setMode('com'); });
   $$('#todo li').forEach(li => li.onclick = () => {
     const e = todo[+li.dataset.i]; hlLayer.clearLayers();
     const lines = e.segs.map(s => { const a = netCurrent.net.nodes.get(s.a), b = netCurrent.net.nodes.get(s.b); return [[a[1], a[0]], [b[1], b[0]]]; });
     const pl = L.polyline(lines, { color: css('--fg'), weight: 7, opacity: .35, interactive: false }).addTo(hlLayer);
-    map.fitBounds(pl.getBounds(), { padding: [60, 60], maxZoom: 17 });
     if (matchMedia('(max-width: 819px)').matches) $('#sheet').classList.add('min');
+    fit(pl.getBounds(), 17);
   });
+}
+
+
+// ---------------- conquest: every commune of Île-de-France by level ----------------
+// level 0 vierge · 1 traversée (touched, or < 5 % of streets) · 2 visitée (5–50 %) · 3 conquise (≥ 50 %)
+const LEVELS = ['Vierges', 'Traversées', 'Visitées', 'Conquises'];
+let pcts = {}; idbGet('pcts').then(v => { if (v) pcts = v; });
+function savePct(code, p) { pcts[code] = { p, t: Date.now() }; idbSet('pcts', pcts); if (conquestOn) drawConquest(); }
+let idfFeats = null, touched = null, conquestOn = false;
+map.createPane('conq').style.zIndex = 250;
+const conqRenderer = L.canvas({ pane: 'conq' });
+const conquestLayer = L.layerGroup();
+
+async function loadIdf() {
+  if (idfFeats) return idfFeats;
+  const c = await idbGet('idfCommunes');
+  if (c && Date.now() - c.t < 90 * 864e5) return (idfFeats = c.f);
+  const [a, b] = await Promise.all([
+    fetch(`${GEO}?codeRegion=11&fields=nom,code&format=geojson&geometry=contour`).then(r => r.json()),
+    fetch(`${GEO}?codeDepartement=75&type=arrondissement-municipal&fields=nom,code&format=geojson&geometry=contour`).then(r => r.json()),
+  ]);
+  const f = [...a.features.filter(x => x.properties.code !== '75056'), ...(b.features || [])]
+    .filter(x => x.geometry).map(x => ({ nom: x.properties.nom, code: x.properties.code, geom: x.geometry, bbox: geomBbox(x.geometry) }));
+  idbSet('idfCommunes', { t: Date.now(), f });
+  return (idfFeats = f);
+}
+// counts fog pixels per commune (in this browser)
+function computeTouched() {
+  const cell = 0.02, grid = new Map(), counts = {};
+  idfFeats.forEach((f, i) => {
+    const [s, w, n, e] = f.bbox;
+    for (let x = Math.floor(w / cell); x <= Math.floor(e / cell); x++) for (let y = Math.floor(s / cell); y <= Math.floor(n / cell); y++) {
+      const k = x + ',' + y; (grid.get(k) || grid.set(k, []).get(k)).push(i);
+    }
+  });
+  for (const [key, b] of fog.blocks) {
+    const gbx = Math.floor(key / 65536), gby = key % 65536;
+    for (let y = 0; y < 64; y += 2) for (let x = 0; x < 64; x += 2) {
+      if (!(b[y * 8 + (x >> 3)] & (0x80 >> (x & 7)))) continue;
+      const lon = (gbx * 64 + x) / WORLD * 360 - 180;
+      const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (gby * 64 + y) / WORLD))) * 180 / Math.PI;
+      const cands = grid.get(Math.floor(lon / cell) + ',' + Math.floor(lat / cell));
+      if (!cands) continue;
+      for (const i of cands) {
+        const [s, w, n, e] = idfFeats[i].bbox;
+        if (lat < s || lat > n || lon < w || lon > e) continue;
+        if (inGeometry(lon, lat, idfFeats[i].geom)) { counts[idfFeats[i].code] = (counts[idfFeats[i].code] || 0) + 1; break; }
+      }
+    }
+  }
+  return counts;
+}
+const levelOf = code => {
+  const p = pcts[code]?.p;
+  if (p !== undefined) return p >= 0.5 ? 3 : p >= 0.05 ? 2 : (touched[code] || p > 0) ? 1 : 0;
+  return (touched[code] || 0) >= 4 ? 1 : 0;
+};
+function drawConquest() {
+  conquestLayer.clearLayers();
+  const cols = [css('--lv0'), css('--lv1'), css('--lv2'), css('--lv3')], n = [0, 0, 0, 0];
+  for (const f of idfFeats) {
+    const lv = levelOf(f.code); n[lv]++;
+    const p = pcts[f.code]?.p;
+    L.geoJSON(f.geom, { pane: 'conq', renderer: conqRenderer, style: { color: css('--line'), weight: .6, fillColor: cols[lv], fillOpacity: lv ? .45 : .12 } })
+      .bindTooltip(`${esc(f.nom)} · ${p !== undefined ? Math.round(p * 100) + ' % des rues' : LEVELS[lv].toLowerCase().replace(/s$/, 'e')}`, { sticky: true })
+      .on('click', () => { if (!conquestOn) return; $('#communeQ').value = f.nom; openCommune(f.code); })
+      .addTo(conquestLayer);
+  }
+  const unknown = idfFeats.filter(f => (touched[f.code] || 0) >= 4 && pcts[f.code] === undefined).length;
+  $('#conquest').innerHTML = `
+    <div class="levels">${LEVELS.map((l, i) => `<div><b>${n[i]}</b><span><i style="background:${cols[i]}"></i>${l}</span></div>`).join('')}</div>
+    <p class="muted small">Sur ${idfFeats.length} communes et arrondissements. Conquise = au moins 50 % des rues faites, visitée = 5 à 50 %, traversée = tu y es passé (train compris).</p>
+    <div class="row wrap">
+      <button id="conquestHide" class="btn small">Masquer la carte</button>
+      ${unknown ? `<button id="conquestCalc" class="btn small">Calculer le % de ${unknown} communes traversées</button>` : ''}
+    </div>
+    <p id="conquestProg" class="muted small" hidden></p>`;
+  $('#conquestHide').onclick = () => { conquestOn = false; conquestLayer.remove(); $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Carte de mes communes</button>'; $('#conquestBtn').onclick = showConquest; };
+  $('#conquestCalc')?.addEventListener('click', calcAll);
+}
+async function showConquest() {
+  if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); return; }
+  $('#conquest').innerHTML = '<p class="muted"><span class="spin"></span> Chargement des 1 300 communes…</p>';
+  try {
+    await loadIdf();
+    if (!touched) touched = computeTouched();
+    conquestOn = true; conquestLayer.addTo(map);
+    drawConquest();
+    fit(L.latLngBounds([[48.12, 1.45], [49.24, 3.56]]));
+  } catch (e) { $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Carte de mes communes</button>'; $('#conquestBtn').onclick = showConquest; toast('Limites des communes indisponibles pour le moment.', true); }
+}
+$('#conquestBtn').onclick = showConquest;
+let calcStop = false;
+async function calcAll() {
+  const list = idfFeats.filter(f => (touched[f.code] || 0) >= 4 && pcts[f.code] === undefined);
+  const btn = $('#conquestCalc'), prog = $('#conquestProg');
+  calcStop = false; btn.textContent = 'Arrêter'; btn.onclick = () => (calcStop = true); prog.hidden = false;
+  for (let i = 0; i < list.length && !calcStop; i++) {
+    const f = list[i];
+    prog.textContent = `${i + 1}/${list.length} : ${f.nom}…`;
+    try {
+      const ways = await getWays(f.bbox, 'c' + f.code);
+      const net = buildNetwork(ways, fog, { radius });
+      const st = summarize(net, s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, f.geom); });
+      pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now() };
+      idbSet('pcts', pcts);
+      await new Promise(r => setTimeout(r, 1500)); // be gentle with the free Overpass servers
+    } catch (e) { prog.textContent = e.message; await new Promise(r => setTimeout(r, 5000)); }
+  }
+  drawConquest();
 }
 
 // commune search (geo.api.gouv.fr: official commune and arrondissement boundaries)
@@ -205,7 +327,7 @@ async function openCommune(code) {
     const c = (await r.json())[0];
     if (!c?.contour) throw new Error();
     ls.set('lastCommune', code);
-    analyze({ name: c.nom, geom: c.contour, bbox: geomBbox(c.contour), key: 'c' + code });
+    analyze({ name: c.nom, code, geom: c.contour, bbox: geomBbox(c.contour), key: 'c' + code });
   } catch (e) { toast('Impossible de récupérer les limites de cette commune.', true); }
 }
 $('#communeHere').onclick = () => locate(async ([lon, lat]) => {
@@ -249,7 +371,7 @@ function setPoint(which, lonlat, label) {
 function drawMarkers() {
   markerLayer.clearLayers();
   for (const [k, txt] of [['from', 'A'], ['to', 'B']]) {
-    if (!pts[k] || (k === 'to' && loopMode)) continue;
+    if (!pts[k] || (k === 'to' && mode !== 'ab')) continue;
     L.marker([pts[k][1], pts[k][0]], { icon: L.divIcon({ className: '', html: `<div style="width:26px;height:26px;border-radius:50%;background:${css('--fg')};color:${css('--bg')};display:grid;place-items:center;font:700 13px system-ui;box-shadow:0 2px 6px rgba(0,0,0,.4)">${txt}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }) }).addTo(markerLayer);
   }
 }
@@ -282,15 +404,43 @@ map.on('click', e => {
 });
 
 // ---------------- routing ----------------
-let loopMode = false;
-function setMode(loop) {
-  loopMode = loop;
-  $('#modeAB').classList.toggle('on', !loop); $('#modeLoop').classList.toggle('on', loop);
-  $('#modeAB').setAttribute('aria-checked', !loop); $('#modeLoop').setAttribute('aria-checked', loop);
-  $('#toField').hidden = loop; $('#loopField').hidden = !loop; drawMarkers();
+let mode = 'ab';
+const MODES = { ab: '#modeAB', loop: '#modeLoop', com: '#modeCom' };
+function setMode(m) {
+  mode = m;
+  for (const [k, sel] of Object.entries(MODES)) { $(sel).classList.toggle('on', k === m); $(sel).setAttribute('aria-checked', k === m); }
+  $('#toField').hidden = m !== 'ab'; $('#loopField').hidden = m !== 'loop'; $('#comField').hidden = m !== 'com';
+  if (m === 'com') $('#comName').textContent = current?.geom ? current.name : 'aucune (choisis-la dans l\'onglet Commune)';
+  drawMarkers();
 }
-$('#modeAB').onclick = () => setMode(false); $('#modeLoop').onclick = () => setMode(true);
+$('#modeAB').onclick = () => setMode('ab'); $('#modeLoop').onclick = () => setMode('loop'); $('#modeCom').onclick = () => setMode('com');
 $('#loopKm').oninput = e => ($('#loopKmV').textContent = e.target.value);
+$('#comKm').oninput = e => ($('#comKmV').textContent = e.target.value);
+$('#charm').checked = ls.get('charm') !== '0';
+$('#charm').onchange = e => ls.set('charm', e.target.checked ? '1' : '0');
+
+// stations (RER, Transilien, métro, tram) from OpenStreetMap, to start or finish at a station
+let stations = [];
+async function loadStations(bbox, key) {
+  const cached = await idbGet('st:' + key);
+  if (cached && Date.now() - cached.t < 30 * 864e5) return (stations = cached.list);
+  stations = await fetchStations(bbox);
+  idbSet('st:' + key, { t: Date.now(), list: stations });
+  return stations;
+}
+$('[data-station="from"]').onclick = async () => {
+  const ul = $('.suggest[data-for="fromQ"]');
+  const ref = pts.from || (current?.geom ? null : [map.getCenter().lng, map.getCenter().lat]);
+  const bbox = current?.geom && !pts.from ? padBbox([[current.bbox[1], current.bbox[0]], [current.bbox[3], current.bbox[2]]], 800) : padBbox([ref], 2500);
+  ul.innerHTML = '<li class="muted"><span class="spin"></span> Recherche des gares…</li>'; ul.hidden = false;
+  try {
+    const list = await loadStations(bbox, bbox.map(x => x.toFixed(2)).join(','));
+    const c = ref || [(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2];
+    const near = list.map(x => ({ ...x, d: distM(...c, x.lon, x.lat) })).sort((a, b) => a.d - b.d).slice(0, 12);
+    ul.innerHTML = near.map((x, i) => `<li data-i="${i}">${esc(x.name)}<small>${esc(x.kind)} · ${km(x.d)}</small></li>`).join('') || '<li class="muted">Aucune gare trouvée ici</li>';
+    ul.querySelectorAll('li[data-i]').forEach(li => li.onclick = () => { const x = near[+li.dataset.i]; ul.hidden = true; setPoint('from', [x.lon, x.lat], 'Gare ' + x.name); map.setView([x.lat, x.lon], 15); });
+  } catch (e) { ul.innerHTML = `<li class="muted">${esc(e.message)}</li>`; }
+};
 
 function padBbox(points, padM) {
   let s = 90, w = 180, n = -90, e = -180;
@@ -303,12 +453,17 @@ let routes = [];
 $('#go').onclick = async () => {
   const out = $('#routeOut');
   if (!fog) { out.innerHTML = `<div class="empty"><b>Il manque tes traces.</b> Charge-les dans l'onglet Données.</div>`; return; }
-  if (!pts.from) { toast('Choisis un départ (adresse, GPS ou carte).', true); return; }
-  if (!loopMode && !pts.to) { toast('Choisis une arrivée.', true); return; }
-  const target = +$('#loopKm').value * 1000;
+  if (mode === 'com' && !current?.geom) { toast("Choisis d'abord une commune dans l'onglet Commune.", true); return; }
+  if (!pts.from) { toast('Choisis un départ (adresse, GPS, gare ou carte).', true); return; }
+  if (mode === 'ab' && !pts.to) { toast('Choisis une arrivée.', true); return; }
+  const target = +$('#loopKm').value * 1000, comBudget = +$('#comKm').value * 1000, toStation = $('#comEnd').value === 'station';
   let bbox;
-  if (loopMode) bbox = padBbox([pts.from], target / 2.6);
-  else {
+  if (mode === 'loop') bbox = padBbox([pts.from], target / 2.6);
+  else if (mode === 'com') {
+    const [s, w, n, e] = current.bbox;
+    bbox = padBbox([[w, s], [e, n], pts.from], 500);
+    if (distM(bbox[1], bbox[0], bbox[3], bbox[2]) > 22000) { toast('Départ trop loin de la commune : choisis un départ dedans ou à côté.', true); return; }
+  } else {
     const d = distM(...pts.from, ...pts.to);
     if (d > 15000) { toast('A et B sont à plus de 15 km : découpe le trajet en étapes.', true); return; }
     bbox = padBbox([pts.from, pts.to], Math.max(600, d * 0.3));
@@ -317,11 +472,26 @@ $('#go').onclick = async () => {
   try {
     const ways = await getWays(bbox, 'r' + bbox.map(x => x.toFixed(3)).join(','));
     const net = buildNetwork(ways, fog, { radius });
-    const g = new Graph(net);
+    const g = new Graph(net, { charm: $('#charm').checked });
     const a = g.nearest(...pts.from);
     if (a.dist > 300) throw new Error('Aucune rue piétonne près du départ.');
-    if (loopMode) routes = routesLoop(g, a.node, target);
-    else {
+    if (mode === 'loop') routes = routesLoop(g, a.node, target);
+    else if (mode === 'com') {
+      const geom = current.geom;
+      const inA = net.segs.map(s => { const p = net.nodes.get(s.a), q = net.nodes.get(s.b); return inGeometry((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, geom); });
+      let ends = [a.node], endNames = new Map();
+      if (toStation) {
+        const st = await loadStations(bbox, bbox.map(x => x.toFixed(2)).join(','));
+        ends = [];
+        for (const x of st) { const nn = g.nearest(x.lon, x.lat); if (nn.dist < 250) { ends.push(nn.node); endNames.set(nn.node, x.name); } }
+        if (!ends.length) throw new Error('Aucune gare trouvée autour de cette commune. Choisis « Retour au départ ».');
+      }
+      routes = [];
+      for (const [f, label] of [[0.6, 'Sortie courte'], [1, 'Sortie complète']]) {
+        const r = routeCommune(g, a.node, { budget: comBudget * f, inArea: si => inA[si], ends });
+        if (r && !routes.some(o => Math.abs(o.len - r.len) < 100)) routes.push({ ...r, label, note: `+${km(r.freshIn)} dans ${current.name}${endNames.has(r.end) ? ' · arrivée gare ' + endNames.get(r.end) : ''}` });
+      }
+    } else {
       const b = g.nearest(...pts.to);
       if (b.dist > 300) throw new Error("Aucune rue piétonne près de l'arrivée.");
       routes = routesAB(g, a.node, b.node) || [];
@@ -332,7 +502,8 @@ $('#go').onclick = async () => {
     out.innerHTML = routes.map((r, i) => `
       <div class="card" data-i="${i}">
         <div class="t"><span>${r.label}</span><span>+${km(r.fresh)} nouveaux</span></div>
-        <div class="kv"><span>${km(r.len)} · ~${Math.round(r.len / 1000 / 4.5 * 60)} min</span><span>${pct(r.fresh, r.len)} % de rues nouvelles${!loopMode && i ? ' · détour +' + pct(r.len - base, base) + ' %' : ''}</span></div>
+        <div class="kv"><span>${km(r.len)} · ~${Math.round(r.len / 1000 / 4.5 * 60)} min</span><span>${pct(r.fresh, r.len)} % de rues nouvelles${mode === 'ab' && i ? ' · détour +' + pct(r.len - base, base) + ' %' : ''}</span></div>
+        ${r.note ? `<div class="kv"><span>${esc(r.note)}</span></div>` : ''}
         <div class="acts"><button class="btn small" data-gpx="${i}">GPX</button><a class="btn small ghost" data-gm="${i}" target="_blank" rel="noopener noreferrer">Google Maps</a></div>
       </div>`).join('') + `<p class="muted small">GPX : à ouvrir dans OsmAnd, Organic Maps ou Komoot pour suivre exactement le tracé. Google Maps recalcule entre quelques points de passage, le tracé peut un peu différer.</p>`;
     $$('#routeOut .card').forEach(c => c.onclick = e => { if (!e.target.closest('.acts')) selectRoute(+c.dataset.i); });
@@ -349,7 +520,7 @@ function selectRoute(i) {
     L.polyline(r.coords.map(([x, y]) => [y, x]), { color: css('--fg'), weight: 3, opacity: .25, interactive: false }).addTo(routeLayer);
   });
   const sel = L.polyline(routes[i].coords.map(([x, y]) => [y, x]), { color: css('--fg'), weight: 5, opacity: .9, interactive: false }).addTo(routeLayer);
-  map.fitBounds(sel.getBounds(), { padding: [30, 30] });
+  fit(sel.getBounds());
   $$('#routeOut .card').forEach(c => c.classList.toggle('sel', +c.dataset.i === i));
 }
 function saveGPX(r) {
@@ -413,7 +584,7 @@ $('#wipeNo').onclick = () => ($('#wipeConfirm').hidden = true);
 $('#wipeYes').onclick = async () => {
   if (dbx.isConnected()) await dbx.disconnect();
   await wipeAll();
-  fog = null; fogMeta = null; current = null; routes = [];
+  fog = null; fogMeta = null; current = null; routes = []; pcts = {}; touched = null; idfFeats = null; conquestOn = false; conquestLayer.remove(); $('#conquestHide')?.click();
   [streetsLayer, outlineLayer, routeLayer, markerLayer, hlLayer].forEach(l => l.clearLayers());
   fogLayer.redraw(); $('#communeOut').innerHTML = ''; $('#routeOut').innerHTML = ''; $('#legend').hidden = true;
   $('#wipeConfirm').hidden = true; $('#dbxKey').value = ''; dbxUi(); fogStatus(null);

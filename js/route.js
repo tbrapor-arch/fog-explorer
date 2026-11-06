@@ -27,8 +27,11 @@ class Heap {
   get size() { return this.k.length; }
 }
 
+const BIG = /^(trunk|primary|secondary)(_link)?$/;
+const SMALL = /^(footway|path|steps|pedestrian|living_street|track|bridleway)$/;
+
 export class Graph {
-  constructor(net) {
+  constructor(net, opts = {}) {
     this.net = net;
     this.idx = new Map(); this.coords = [];
     const ids = [];
@@ -38,6 +41,43 @@ export class Graph {
       const a = id(s.a), b = id(s.b);
       (this.adj[a] ||= []).push(b, si); (this.adj[b] ||= []).push(a, si);
     });
+    this.setCharm(opts.charm);
+  }
+  // "charme": small streets, passages and steps feel cheaper, big roads feel longer
+  setCharm(on) {
+    this.mult = new Float32Array(this.net.segs.length).fill(1);
+    if (!on) return;
+    this.net.segs.forEach((s, i) => {
+      const hw = this.net.ways[s.w].hw;
+      this.mult[i] = BIG.test(hw) ? 1.4 : hw === 'tertiary' || hw === 'service' ? 1.1 : SMALL.test(hw) ? 0.85 : 1;
+    });
+  }
+  // Dijkstra; stops early at `to` if given. used: Set of segs already walked (count as explored)
+  run(from, to, alpha, penalty, used) {
+    const n = this.coords.length, dist = new Float64Array(n).fill(Infinity), prev = new Int32Array(n).fill(-1), prevSeg = new Int32Array(n).fill(-1);
+    const segs = this.net.segs, mult = this.mult, h = new Heap();
+    dist[from] = 0; h.push(0, from);
+    while (h.size) {
+      const u = h.pop();
+      if (u === to) break;
+      const du = dist[u], a = this.adj[u];
+      if (!a) continue;
+      for (let j = 0; j < a.length; j += 2) {
+        const v = a[j], si = a[j + 1], s = segs[si];
+        const fresh = !s.done && !(used && used.has(si));
+        let c = s.len * (fresh ? alpha : 1) * mult[si];
+        if (penalty && penalty.has(si)) c *= penalty.get(si);
+        const nd = du + c;
+        if (nd < dist[v] - 1e-9) { dist[v] = nd; prev[v] = u; prevSeg[v] = si; h.push(nd, v); }
+      }
+    }
+    return { dist, prev, prevSeg };
+  }
+  pathTo(t, from, to) {
+    if (from !== to && t.prev[to] < 0) return null;
+    const path = [to], segs = [];
+    for (let v = to; v !== from; v = t.prev[v]) { segs.push(t.prevSeg[v]); path.push(t.prev[v]); }
+    return { path: path.reverse(), segs: segs.reverse() };
   }
   nearest(lon, lat) {
     let best = -1, bd = Infinity;
@@ -50,28 +90,8 @@ export class Graph {
     return { node: best, dist: bd };
   }
   // penalty: Map(segIndex -> multiplier) used to avoid reusing segments on the way back
-  shortest(from, to, alpha, penalty) {
-    const n = this.coords.length, dist = new Float64Array(n).fill(Infinity), prev = new Int32Array(n).fill(-1), prevSeg = new Int32Array(n).fill(-1);
-    const segs = this.net.segs, h = new Heap();
-    dist[from] = 0; h.push(0, from);
-    while (h.size) {
-      const u = h.pop();
-      if (u === to) break;
-      const du = dist[u], a = this.adj[u];
-      if (!a) continue;
-      for (let j = 0; j < a.length; j += 2) {
-        const v = a[j], si = a[j + 1], s = segs[si];
-        let c = s.len * (s.done ? 1 : alpha);
-        if (penalty && penalty.has(si)) c *= penalty.get(si);
-        const nd = du + c;
-        if (nd < dist[v] - 1e-9) { dist[v] = nd; prev[v] = u; prevSeg[v] = si; h.push(nd, v); }
-      }
-    }
-    if (from !== to && prev[to] < 0) return null;
-    const path = [to], segList = [];
-    for (let v = to; v !== from; v = prev[v]) { segList.push(prevSeg[v]); path.push(prev[v]); }
-    path.reverse(); segList.reverse();
-    return { path, segs: segList };
+  shortest(from, to, alpha, penalty, used) {
+    return this.pathTo(this.run(from, to, alpha, penalty, used), from, to);
   }
   describe(parts) {
     const segs = [].concat(...parts.map(p => p.segs)), nodes = [];
@@ -137,4 +157,50 @@ export function routesLoop(g, start, targetM) {
 export function toGPX(coords, name) {
   const pts = coords.map(([lon, lat]) => `<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"/>`).join('');
   return `<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="Fog Explorer" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>${name}</name><trkseg>${pts}</trkseg></trk></gpx>`;
+}
+
+// "Cocher une commune": greedy orienteering. From the current point, go to the reachable spot that
+// collects the most new metres inside the commune per metre walked, while keeping enough budget to
+// reach a finish (the start for a loop, or the nearest station). Repeat, then walk to the finish.
+export function routeCommune(g, start, { budget, inArea, ends }) {
+  const segs = g.net.segs, used = new Set(), parts = [], n = g.coords.length;
+  const endCoords = ends.map(e => g.coords[e]);
+  const toEnd = v => {
+    const [x, y] = g.coords[v]; let m = Infinity;
+    for (const [a, b] of endCoords) { const d = distM(x, y, a, b); if (d < m) m = d; }
+    return m * 1.3;
+  };
+  const real = new Float64Array(n), gain = new Float64Array(n);
+  let cur = start, walked = 0;
+  for (let iter = 0; iter < 80; iter++) {
+    const t = g.run(cur, -1, 0.35, null, used);
+    const idx = [];
+    for (let v = 0; v < n; v++) if (t.dist[v] < Infinity) idx.push(v);
+    idx.sort((a, b) => t.dist[a] - t.dist[b]);
+    real[cur] = 0; gain[cur] = 0;
+    let best = -1, bs = 0;
+    for (const v of idx) {
+      if (v === cur) continue;
+      const p = t.prev[v], si = t.prevSeg[v], s = segs[si];
+      real[v] = real[p] + s.len;
+      gain[v] = gain[p] + (!s.done && !used.has(si) && inArea(si) ? s.len : 0);
+      if (gain[v] < 120 || walked + real[v] + toEnd(v) > budget) continue;
+      const sc = gain[v] / (real[v] + 150);
+      if (sc > bs) { bs = sc; best = v; }
+    }
+    if (best < 0) break;
+    const p = g.pathTo(t, cur, best);
+    parts.push(p); p.segs.forEach(s => used.add(s)); walked += real[best]; cur = best;
+  }
+  const pen = new Map([...used].map(s => [s, 2]));
+  const t = g.run(cur, -1, 0.6, pen, used);
+  let e = -1, ed = Infinity;
+  for (const x of ends) if (t.dist[x] < ed) { ed = t.dist[x]; e = x; }
+  if (e < 0) return null;
+  if (e !== cur) parts.push(g.pathTo(t, cur, e));
+  if (!parts.length) return null;
+  const d = g.describe(parts);
+  const seen = new Set(); let freshIn = 0;
+  for (const si of d.segs) { if (!seen.has(si) && !segs[si].done && inArea(si)) freshIn += segs[si].len; seen.add(si); }
+  return { ...d, freshIn, end: e };
 }
