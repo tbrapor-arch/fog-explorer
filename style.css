@@ -139,3 +139,9 @@ code { font: 12px var(--mono); background: var(--panel); padding: 1px 5px; borde
 .basemap { filter: grayscale(.75) contrast(.85) brightness(1.06); }
 .rlab { position: absolute; transform: translate(-50%, -130%); white-space: nowrap; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; font: 600 12px var(--font); box-shadow: var(--shadow); cursor: pointer; }
 .rlab.on { background: var(--fg); color: var(--panel); border-color: transparent; }
+details.todo summary { cursor: pointer; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; padding: 6px 0; }
+.qpop .leaflet-popup-content { margin: 12px 14px; font: 14px/1.4 var(--font); }
+.qbig { font: 700 26px/1.1 var(--font); margin: 4px 0; font-variant-numeric: tabular-nums; }
+.qbig small { font-size: 13px; font-weight: 500; color: var(--muted); }
+.qs { font-size: 12px; color: var(--muted); }
+.qa { display: flex; gap: 6px; margin-top: 8px; }

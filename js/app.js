@@ -18,6 +18,7 @@ let radius = +(ls.get('tol') || 2);
 // ---------------- map ----------------
 const map = L.map('map', { zoomControl: false, preferCanvas: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 0.5 }).setView([48.8566, 2.3522], 12);
 L.control.zoom({ position: 'topright' }).addTo(map);
+window.__map = map; // handy for debugging from the console
 let base;
 const BASES = {
   epure: () => ({ url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', subdomains: '', native: 16,
@@ -267,7 +268,7 @@ async function analyze(area, fitView = true) {
     drawStreets(net, filter);
     const st = summarize(net, filter || (() => true));
     renderStats(area, st);
-    if (area.code) savePct(area.code, st.roads.total ? st.roads.done / st.roads.total : 0);
+    if (area.code) savePct(area.code, st.roads.total ? st.roads.done / st.roads.total : 0, { fin: st.finished, n: st.streets, km: st.roads.total });
   } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   fogStatus(fogMeta);
 }
@@ -285,10 +286,10 @@ function renderStats(area, st) {
       <div class="kv"><span>Chemins et allées : ${pct(p.done, p.total)} %</span><span>niveau : <b>${LEVELS[levelFromPct(r.total ? r.done / r.total : 0, true)]}</b></span></div>
     </div>
     ${area.geom ? `<button id="toCom" class="btn primary">Itinéraire pour cocher ${esc(area.name)}</button>` : ''}
-    <h3>Rues à finir</h3>
+    <details class="todo"><summary>Rues à finir (${todo.length})</summary>
     <ul class="list" id="todo">${todo.slice(0, 60).map((e, i) => `
       <li data-i="${i}"><span class="n">${esc(e.name)}</span><span class="v">${km(e.left)}</span>
-      <span class="s">${e.done < 1 ? 'jamais parcourue' : pct(e.done, e.total) + ' % faite'} · ${km(e.total)} au total</span></li>`).join('')}</ul>`;
+      <span class="s">${e.done < 1 ? 'jamais parcourue' : pct(e.done, e.total) + ' % faite'} · ${km(e.total)} au total</span></li>`).join('')}</ul></details>`;
   $('#toCom')?.addEventListener('click', () => { showTab('route'); setMode('com'); });
   $$('#todo li').forEach(li => li.onclick = () => {
     const e = todo[+li.dataset.i]; hlLayer.clearLayers();
@@ -310,7 +311,12 @@ function levelFromPct(p, touchedOrPos) {
   return touchedOrPos || p > 0 ? 1 : 0;
 }
 let pcts = {}; idbGet('pcts').then(v => { if (v) pcts = v; });
-function savePct(code, p) { pcts[code] = { p, t: Date.now(), f: fogMeta?.date || null }; idbSet('pcts', pcts); if (conquestOn) drawConquest(); }
+// a commune's % is recomputed only when you have new traces in it (its explored-pixel count changed)
+const pxIn = code => touched ? (touched[code] || 0) : undefined;
+const isStale = code => { const e = pcts[code]; if (!e) return (touched?.[code] || 0) >= 4; if (e.px === undefined) return true; return touched ? e.px !== pxIn(code) : false; };
+async function savePct(code, p, extra = {}) {
+  if (!touched) { try { await loadIdf(); touched = computeTouched(); } catch (e) {} }
+  pcts[code] = { p, t: Date.now(), px: pxIn(code), ...extra }; idbSet('pcts', pcts); if (conquestOn) drawConquest(); }
 let idfFeats = null, touched = null, conquestOn = false;
 map.createPane('conq').style.zIndex = 250;
 const conqRenderer = L.canvas({ pane: 'conq' });
@@ -376,9 +382,7 @@ function drawConquest(refit = false) {
     const lv = levelOf(f.code); n[lv]++;
     const p = pcts[f.code]?.p;
     const fill = conqView === 'visit' ? (lv ? cVis : cNo) : cols[lv];
-    L.geoJSON(f.geom, { pane: 'conq', renderer: conqRenderer, style: { color: css('--bg'), weight: .7, fillColor: fill, fillOpacity: lv ? .55 : .18 } })
-      .bindTooltip(`<b>${esc(f.nom)}</b><br>${lv ? (p !== undefined ? Math.round(p * 100) + ' % des rues · ' + LEVELS[lv].toLowerCase() : 'visitée (% non calculé)') : 'pas encore visitée'}`, { sticky: true })
-      .on('click', () => { if (!conquestOn) return; $('#communeQ').value = f.nom; openCommune(f.code); })
+    L.geoJSON(f.geom, { pane: 'conq', renderer: conqRenderer, interactive: false, style: { color: css('--bg'), weight: .7, fillColor: fill, fillOpacity: lv ? .55 : .18 } })
       .addTo(conquestLayer);
   }
   // department borders + labels
@@ -394,7 +398,7 @@ function drawConquest(refit = false) {
     if (refit) fit(gj.getBounds());
   }
   const tot = feats.length, vis = feats.filter(f => visited(f.code)).length;
-  const unknown = feats.filter(f => (touched[f.code] || 0) >= 4 && (pcts[f.code] === undefined || (fogMeta?.date && pcts[f.code].f !== fogMeta.date))).length;
+  const unknown = feats.filter(f => isStale(f.code)).length;
   const place = conqDept === 'all' ? "en Île-de-France" : (conqDept === '75' ? 'à Paris' : 'en ' + DEPTS[conqDept]);
   $('#conquest').innerHTML = `
     <div class="row">
@@ -418,7 +422,7 @@ function drawConquest(refit = false) {
       <span class="s"><span class="bar"><i style="width:${st.n ? 100 * st.v / st.n : 0}%"></i></span></span></li>`; }).join('')}</ul>` : ''}
     <div class="row wrap">
       <button id="conquestHide" class="btn small">Masquer la carte</button>
-      ${unknown ? `<button id="conquestCalc" class="btn small">Calculer / mettre à jour ${unknown} communes</button>` : ''}
+      ${unknown ? `<button id="conquestCalc" class="btn small">Mettre à jour ${unknown} commune${unknown > 1 ? 's' : ''} avec de nouvelles traces</button>` : '<span class="muted small">Tout est à jour ✓</span>'}
     </div>
     <p id="conquestProg" class="muted small" hidden></p>`;
   $('#legend').innerHTML = conqView === 'visit'
@@ -483,13 +487,13 @@ function drawComTable(feats) {
   const rows = feats.filter(f => (tableAll || levelOf(f.code) > 0 || pcts[f.code]) && (!tableQ || f.nom.toLowerCase().includes(tableQ)))
     .map(f => ({ f, p: pcts[f.code], lv: levelOf(f.code) }))
     .sort((a, b) => (b.p?.p ?? -1) - (a.p?.p ?? -1) || a.f.nom.localeCompare(b.f.nom));
-  const stale = r => r.p && fogMeta?.date && r.p.f !== fogMeta.date;
+  const stale = r => r.p && isStale(r.f.code);
   $('#comTable').innerHTML = `
     <div class="row"><input id="tableQ" type="search" placeholder="Filtrer les communes" value="${esc(tableQ)}" autocomplete="off">
     <label class="check small"><input type="checkbox" id="tableAll" ${tableAll ? 'checked' : ''}> vierges aussi</label></div>
     <ul class="list">${rows.slice(0, 400).map(r => `
       <li data-code="${r.f.code}"><span class="n">${esc(r.f.nom)}</span><span class="v">${r.p ? Math.round(r.p.p * 100) + ' %' : '—'}</span>
-      <span class="s">${LEVELS[r.lv]} · ${r.p ? 'calculé le ' + fmtDay(r.p.t) + (stale(r) ? ' · <b>traces plus récentes depuis</b>' : '') : 'pas encore calculé'}</span></li>`).join('')}</ul>
+      <span class="s">${LEVELS[r.lv]} · ${r.p ? 'calculé le ' + fmtDay(r.p.t) + (stale(r) ? ' · <b>nouvelles traces depuis</b>' : '') : 'pas encore calculé'}</span></li>`).join('')}</ul>
     ${rows.length > 400 ? `<p class="muted small">${rows.length - 400} autres : affine avec le filtre.</p>` : ''}`;
   $('#tableQ').oninput = e => { tableQ = e.target.value.toLowerCase(); const pos = e.target.selectionStart; drawComTable(feats); const q = $('#tableQ'); q.focus(); q.setSelectionRange(pos, pos); };
   $('#tableAll').onchange = e => { tableAll = e.target.checked; drawComTable(feats); };
@@ -527,7 +531,7 @@ L.Control.Conq = L.Control.extend({ onAdd() {
 new L.Control.Conq({ position: 'topright' }).addTo(map);
 let calcStop = false;
 async function calcAll() {
-  const list = idfFeats.filter(f => (touched[f.code] || 0) >= 4 && (pcts[f.code] === undefined || (fogMeta?.date && pcts[f.code].f !== fogMeta.date)));
+  const list = idfFeats.filter(f => isStale(f.code));
   const btn = $('#conquestCalc'), prog = $('#conquestProg');
   calcStop = false; btn.textContent = 'Arrêter'; btn.onclick = () => (calcStop = true); prog.hidden = false;
   for (let i = 0; i < list.length && !calcStop; i++) {
@@ -537,9 +541,9 @@ async function calcAll() {
       const ways = await getWays(f.bbox, null);
       const net = buildNetwork(ways, fog, { radius });
       const st = summarize(net, s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, f.geom); });
-      pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now(), f: fogMeta?.date || null };
+      pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now(), px: pxIn(f.code), fin: st.finished, n: st.streets, km: st.roads.total };
       idbSet('pcts', pcts);
-      await new Promise(r => setTimeout(r, 1500)); // be gentle with the free Overpass servers
+      await new Promise(r => setTimeout(r, manifest ? 30 : 1500)); // be gentle with the free Overpass servers
     } catch (e) { prog.textContent = e.message; await new Promise(r => setTimeout(r, 5000)); }
   }
   drawConquest();
@@ -639,8 +643,38 @@ $$('[data-pick]').forEach(b => b.onclick = () => {
   $$('[data-pick]').forEach(x => x.classList.toggle('picking', x.dataset.pick === picking));
   if (picking) { toast('Touche la carte pour placer le point.'); if (matchMedia('(max-width: 819px)').matches) $('#sheet').classList.add('min'); }
 });
+// tap anywhere on the map: quick stats of the commune there
+async function quickStats(f) {
+  if (!pcts[f.code] || isStale(f.code)) {
+    const ways = await getWays(f.bbox, null);
+    const net = buildNetwork(ways, fog, { radius });
+    const st = summarize(net, s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, f.geom); });
+    pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now(), px: pxIn(f.code), fin: st.finished, n: st.streets, km: st.roads.total };
+    idbSet('pcts', pcts);
+  }
+  return pcts[f.code];
+}
+async function tapStats(latlng) {
+  if (!fog) return;
+  let f;
+  try { await loadIdf(); if (!touched) touched = computeTouched(); f = idfFeats.find(x => { const [s, w, n, e] = x.bbox; return latlng.lat >= s && latlng.lat <= n && latlng.lng >= w && latlng.lng <= e && inGeometry(latlng.lng, latlng.lat, x.geom); }); }
+  catch (e) { return; }
+  if (!f) return;
+  const pop = L.popup({ maxWidth: 260, className: 'qpop' }).setLatLng(latlng).setContent(`<b>${esc(f.nom)}</b><br><span class="spin"></span> calcul…`).openOn(map);
+  try {
+    const e = await quickStats(f), lv = levelFromPct(e.p, (touched[f.code] || 0) >= 4);
+    pop.setContent(`<b>${esc(f.nom)}</b><div class="qbig">${Math.round(e.p * 100)} %<small> des rues · ${LEVELS[lv]}</small></div>
+      ${e.n ? `<div class="qs">${e.fin} rues finies sur ${e.n} · ${km(e.km)} de rues</div>` : ''}
+      <div class="qs">calculé le ${fmtDay(e.t)}</div>
+      <div class="qa"><button class="btn small" data-q="detail">Détail</button><button class="btn small primary" data-q="route">La cocher</button></div>`);
+    const el = pop.getElement();
+    el.querySelector('[data-q="detail"]').onclick = () => { map.closePopup(); showTab('commune'); $('#communeQ').value = f.nom; openCommune(f.code); };
+    el.querySelector('[data-q="route"]').onclick = async () => { map.closePopup(); $('#communeQ').value = f.nom; await openCommune(f.code); showTab('route'); setMode('com'); };
+    if (conquestOn) drawConquest();
+  } catch (err) { pop.setContent(`<b>${esc(f.nom)}</b><br>${esc(err.message)}`); }
+}
 map.on('click', e => {
-  if (!picking) return;
+  if (!picking) { tapStats(e.latlng); return; }
   setPoint(picking, [e.latlng.lng, e.latlng.lat]);
   picking = null; $$('[data-pick]').forEach(x => x.classList.remove('picking'));
   $('#sheet').classList.remove('min');
@@ -834,16 +868,20 @@ async function syncDropbox() {
   try {
     const cache = (await idbGet('dbxCache')) || {};
     const r = await dbx.sync(cache, msg => chip(msg, 'busy'));
-    await idbSet('dbxCache', r.cache);
     $('#dbxFolder').value = dbx.folder();
-    fogMeta = { source: 'Dropbox, ' + r.source, date: r.date };
-    await setFog(r.fog, fogMeta);
+    if (r.unchanged && fog) { fogStatus(fogMeta); }
+    else {
+      if (r.unchanged) { await idbSet('dbxCache', {}); return syncDropbox(); } // no local traces anymore: fetch again
+      await idbSet('dbxCache', r.cache);
+      fogMeta = { source: 'Dropbox, ' + r.source, date: r.date };
+      await setFog(r.fog, fogMeta);
+    }
     const when = new Date(r.date).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
     $('#dbxStatus').innerHTML = r.kind === 'sync'
       ? `Connecté · <b>synchro automatique active</b> : je lis le dossier Sync de Fog of World (dernière modification ${when}).`
-      : `Connecté · <b>synchro automatique pas encore active</b> : je n'ai trouvé que des snapshots manuels dans « ${esc(r.folder)} » (dernier : ${when}). Active la synchro Dropbox dans Fog of World (onglet nuage) pour que tout se mette à jour seul.<br><small>Dossiers vus : ${r.dirs.map(esc).join(' · ')}</small>`;
+      : `Connecté · <b>synchro automatique pas encore active</b> : je n'ai trouvé que des snapshots manuels dans « ${esc(r.folder)} » (dernier : ${when}). Active la synchro Dropbox dans Fog of World (onglet nuage) pour que tout se mette à jour seul.<br><small>Dossiers vus : ${(r.dirs || []).map(esc).join(' · ')}</small>`;
     ls.set('dbxLast', $('#dbxStatus').innerHTML);
-    toast(r.kind === 'sync' ? 'Traces à jour (synchro auto Dropbox).' : 'Traces chargées depuis le dernier snapshot Dropbox.');
+    if (!r.unchanged) toast(r.kind === 'sync' ? 'Nouvelles traces reçues (synchro auto Dropbox).' : 'Traces chargées depuis le dernier snapshot Dropbox.');
   } catch (e) { toast(e.message, true); fogStatus(fogMeta); dbxUi(); }
 }
 

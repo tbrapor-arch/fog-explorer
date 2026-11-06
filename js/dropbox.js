@@ -119,8 +119,12 @@ export async function sync(cache = {}, onProgress = () => {}) {
     files = await listAll(f);
   }
   const tiles = files.filter(f => tileIdFromName(f.name) !== null && !/\.fwss$/i.test(f.name) && /\/sync\//i.test(f.path_lower));
+  const dirs = [...new Set(files.map(f => f.path_display.split('/').slice(0, -1).join('/')))].slice(0, 8);
   if (tiles.length) {
-    const fog = new FogMap(), next = {};
+    // nothing changed since last time: skip downloading and decoding
+    if (cache.__kind === 'sync' && tiles.length === Object.keys(cache).filter(k => !k.startsWith('__')).length && tiles.every(f => cache[f.path_lower]?.hash === f.content_hash))
+      return { unchanged: true, cache, kind: 'sync', date: latest(tiles), folder: folder() };
+    const fog = new FogMap(), next = { __kind: 'sync' };
     let i = 0;
     for (const f of tiles) {
       onProgress(`Synchro : ${++i}/${tiles.length} tuiles`);
@@ -133,8 +137,9 @@ export async function sync(cache = {}, onProgress = () => {}) {
   }
   const snaps = files.filter(f => /\.fwss$/i.test(f.name)).sort((a, b) => b.server_modified.localeCompare(a.server_modified));
   if (!snaps.length) throw new Error(`Rien trouvé dans « ${folder()} » : ni dossier Sync, ni snapshot .fwss. Active la synchro Dropbox dans Fog of World, ou envoie un snapshot sur Dropbox.`);
+  if (cache.__kind === 'snapshot' && cache.__rev === snaps[0].rev) return { unchanged: true, cache, kind: 'snapshot', date: snaps[0].server_modified, folder: folder(), dirs };
   onProgress('Téléchargement du snapshot ' + snaps[0].name);
   const fog = await fogFromSnapshot((await download(snaps[0].path_lower)).buffer);
-  return { fog, cache: {}, kind: 'snapshot', source: 'snapshot ' + snaps[0].name, date: snaps[0].server_modified, folder: folder(), nFiles: files.length, dirs: [...new Set(files.map(f => f.path_display.split('/').slice(0, -1).join('/')))].slice(0, 8) };
+  return { fog, cache: { __kind: 'snapshot', __rev: snaps[0].rev }, kind: 'snapshot', source: 'snapshot ' + snaps[0].name, date: snaps[0].server_modified, folder: folder(), nFiles: files.length, dirs };
 }
 const latest = fs => fs.map(f => f.server_modified).sort().pop();
