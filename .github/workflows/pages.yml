@@ -1,0 +1,54 @@
+# Builds the Île-de-France street data from OpenStreetMap (public data, no personal data)
+# and publishes the app + data on GitHub Pages. Street data is rebuilt once a month.
+name: Publier l'appli et les rues
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 3 2 * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mois courant
+        id: month
+        run: echo "m=$(date +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Données de rues du mois (cache)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: streetdata
+          key: streets-idf-${{ steps.month.outputs.m }}-${{ hashFiles('tools/build_streets.py') }}
+      - name: Construire les rues d'Île-de-France
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          pip install osmium
+          curl -fsSL -o idf.osm.pbf https://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf
+          python tools/build_streets.py idf.osm.pbf streetdata
+      - name: Assembler le site
+        run: |
+          mkdir -p _site
+          rsync -a --exclude '.git' --exclude '.github' --exclude 'tools' --exclude 'streetdata' --exclude 'idf.osm.pbf' --exclude '_site' ./ _site/
+          mkdir -p _site/data && cp -r streetdata/* _site/data/
+          du -sh _site/data
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

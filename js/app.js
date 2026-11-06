@@ -1,5 +1,5 @@
 import { FogMap, fogFromSnapshot, WORLD } from './fog.js';
-import { fetchWays, fetchStations, buildNetwork, summarize, inGeometry, geomBbox, distM } from './streets.js';
+import { fetchWays, fetchStations, cellsFor, gunzipJSON, decodeTile, tilesFor, buildNetwork, summarize, inGeometry, geomBbox, distM } from './streets.js';
 import { Graph, routesAB, routesLoop, routeCommune, toGPX } from './route.js';
 import { idbGet, idbSet, wipeAll, ls } from './store.js';
 import * as dbx from './dropbox.js';
@@ -127,16 +127,100 @@ let current = null;          // { name, geom?, bbox, ways }
 const waysCache = new Map(); // bbox key -> ways (memory)
 let netCurrent = null;
 
-async function getWays(bbox, key) {
-  if (waysCache.has(key)) return waysCache.get(key);
-  const stored = await idbGet('ways:' + key);
-  if (stored && Date.now() - stored.t < 14 * 864e5) { waysCache.set(key, stored.ways); return stored.ways; }
-  const ways = await fetchWays(bbox);
-  // keep only what we need to reduce storage
-  const slim = ways.map(w => ({ id: w.id, nodes: w.nodes, geometry: w.geometry.map(g => g && { lon: g.lon, lat: g.lat }), tags: { highway: w.tags?.highway, name: w.tags?.name, width: w.tags?.width } }));
-  waysCache.set(key, slim); idbSet('ways:' + key, { t: Date.now(), ways: slim });
-  return slim;
+const CELL_DAYS = 30;
+const slimWays = ways => ways.map(w => ({ id: w.id, nodes: w.nodes, geometry: w.geometry.map(g => g && { lon: +g.lon.toFixed(6), lat: +g.lat.toFixed(6) }), tags: { highway: w.tags?.highway, name: w.tags?.name, width: w.tags?.width } }));
+async function getCell(c) {
+  if (waysCache.has(c.key)) return waysCache.get(c.key);
+  const st = await idbGet('cell:' + c.key);
+  if (st && Date.now() - st.t < CELL_DAYS * 864e5) { waysCache.set(c.key, st.ways); return st.ways; }
+  return null;
 }
+// ---- local street data (published with the app, downloaded once, kept on the phone) ----
+let manifest; // undefined = not checked yet, null = not available
+async function getManifest() {
+  if (manifest !== undefined) return manifest;
+  try { const r = await fetch('data/manifest.json', { cache: 'no-cache' }); manifest = r.ok ? await r.json() : null; }
+  catch (e) { manifest = (await idbGet('manifest')) || null; } // offline: use the last known one
+  if (manifest) idbSet('manifest', manifest);
+  return manifest;
+}
+const tileMem = new Map(); // decoded tiles, small LRU
+async function tileBytes(key, m) {
+  const id = 'tile:' + m.date + ':' + key;
+  let b = await idbGet(id);
+  if (!b) {
+    const r = await fetch('data/t/' + key + '.json.gz');
+    if (!r.ok) throw new Error('Données de rues indisponibles (' + r.status + ').');
+    b = new Uint8Array(await r.arrayBuffer());
+    await idbSet(id, b);
+  }
+  return b;
+}
+async function tileData(key, m) {
+  if (tileMem.has(key)) { const v = tileMem.get(key); tileMem.delete(key); tileMem.set(key, v); return v; }
+  const v = await gunzipJSON(await tileBytes(key, m));
+  tileMem.set(key, v); if (tileMem.size > 24) tileMem.delete(tileMem.keys().next().value);
+  return v;
+}
+async function getWays(bbox, _key, onProg = () => {}) {
+  const m = await getManifest();
+  if (!m) return getWaysOverpass(bbox, _key, onProg);
+  const keys = tilesFor(bbox, m.tileLat, m.tileLon).filter(k => m.tiles[k]);
+  const seen = new Set(), all = []; let d = 0;
+  onProg(0, keys.length);
+  for (const k of keys) {
+    for (const w of decodeTile(await tileData(k, m), bbox)) if (!seen.has(w.id)) { seen.add(w.id); all.push(w); }
+    onProg(++d, keys.length);
+  }
+  return all;
+}
+let stationsAll = null;
+async function localStations(bbox) {
+  const m = await getManifest(); if (!m) return null;
+  if (!stationsAll) {
+    let b = await idbGet('stations:' + m.date);
+    if (!b) { const r = await fetch('data/stations.json.gz'); if (!r.ok) return null; b = new Uint8Array(await r.arrayBuffer()); idbSet('stations:' + m.date, b); }
+    stationsAll = await gunzipJSON(b);
+  }
+  const [s, w, n, e] = bbox, seen = new Map();
+  for (const [name, lon, lat, kind] of stationsAll) {
+    if (lat < s || lat > n || lon < w || lon > e) continue;
+    const k = name + '|' + Math.round(lat * 200) + '|' + Math.round(lon * 200), prev = seen.get(k);
+    if (!prev) seen.set(k, { name, lon, lat, kind }); else if (!prev.kind.includes(kind)) prev.kind += ', ' + kind;
+  }
+  return [...seen.values()];
+}
+// one-time download of the whole region
+async function downloadAll(onProg) {
+  const m = await getManifest();
+  if (!m) throw new Error("Les données de toute l'Île-de-France ne sont pas encore publiées.");
+  try { await navigator.storage?.persist?.(); } catch (e) {}
+  const keys = Object.keys(m.tiles); let done = 0, bytes = 0;
+  const work = async () => { while (keys.length) { const k = keys.shift(); await tileBytes(k, m); bytes += m.tiles[k]; onProg(++done, Object.keys(m.tiles).length, bytes, m.bytes); } };
+  await Promise.all([work(), work(), work(), work()]);
+  await localStations([-90, -180, 90, 180]);
+  ls.set('allDownloaded', m.date);
+}
+
+// fallback: live Overpass, by cells. onProg(done, total), 2 at a time (the free servers allow 2 slots)
+async function getWaysOverpass(bbox, _key, onProg = () => {}) {
+  const cells = cellsFor(bbox), have = new Map(), missing = [];
+  for (const c of cells) { const w = await getCell(c); if (w) have.set(c.key, w); else missing.push(c); }
+  let done = cells.length - missing.length; onProg(done, cells.length);
+  const worker = async () => {
+    while (missing.length) {
+      const c = missing.shift();
+      const ways = slimWays(await fetchWays(c.bbox));
+      waysCache.set(c.key, ways); have.set(c.key, ways); idbSet('cell:' + c.key, { t: Date.now(), ways });
+      onProg(++done, cells.length);
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  const seen = new Set(), all = [];
+  for (const ws of have.values()) for (const w of ws) if (!seen.has(w.id)) { seen.add(w.id); all.push(w); }
+  return all;
+}
+const progTxt = (what, d, t) => t > 1 && d < t ? `${what} : zone ${d + 1}/${t}…` : `${what}…`;
 
 function drawStreets(net, filter) {
   streetsLayer.clearLayers();
@@ -173,7 +257,8 @@ async function analyze(area, fitView = true) {
   out.innerHTML = `<p class="muted"><span class="spin"></span> Chargement des rues de ${esc(area.name)}…</p>`;
   chip('Chargement des rues…', 'busy');
   try {
-    const ways = await getWays(area.bbox, area.key);
+    const ways = await getWays(area.bbox, area.key, (d, t) => { const m = progTxt('Téléchargement des rues de ' + area.name, d, t); chip(m, 'busy'); const p = $('#communeOut p.muted'); if (p) p.innerHTML = '<span class="spin"></span> ' + esc(m); });
+    chip('Croisement avec tes traces…', 'busy'); await new Promise(r => setTimeout(r, 0));
     const net = buildNetwork(ways, fog, { radius });
     const midIn = s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, area.geom); };
     const filter = area.geom ? midIn : null;
@@ -385,7 +470,7 @@ async function calcAll() {
     const f = list[i];
     prog.textContent = `${i + 1}/${list.length} : ${f.nom}…`;
     try {
-      const ways = await getWays(f.bbox, 'c' + f.code);
+      const ways = await getWays(f.bbox, null);
       const net = buildNetwork(ways, fog, { radius });
       const st = summarize(net, s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, f.geom); });
       pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now() };
@@ -516,9 +601,9 @@ $('#charm').onchange = e => ls.set('charm', e.target.checked ? '1' : '0');
 // stations (RER, Transilien, métro, tram) from OpenStreetMap, to start or finish at a station
 let stations = [];
 async function loadStations(bbox, key) {
-  const cached = await idbGet('st:' + key);
+  const cached = (await getManifest()) ? null : await idbGet('st:' + key);
   if (cached && Date.now() - cached.t < 30 * 864e5) return (stations = cached.list);
-  stations = await fetchStations(bbox);
+  stations = (await localStations(bbox)) || await fetchStations(bbox);
   idbSet('st:' + key, { t: Date.now(), list: stations });
   return stations;
 }
@@ -560,12 +645,15 @@ $('#go').onclick = async () => {
   } else {
     const d = distM(...pts.from, ...pts.to);
     if (d > 15000) { toast('A et B sont à plus de 15 km : découpe le trajet en étapes.', true); return; }
-    bbox = padBbox([pts.from, pts.to], Math.max(600, d * 0.3));
+    bbox = padBbox([pts.from, pts.to], Math.max(500, d * 0.18));
   }
   $('#go').disabled = true; out.innerHTML = `<p class="muted"><span class="spin"></span> Chargement des rues et calcul…</p>`;
   try {
-    const ways = await getWays(bbox, 'r' + bbox.map(x => x.toFixed(3)).join(','));
+    const say = m => { const p = $('#routeOut p.muted'); if (p) p.innerHTML = '<span class="spin"></span> ' + esc(m); };
+    const ways = await getWays(bbox, null, (d, t) => say(progTxt('Téléchargement des rues', d, t)));
+    say('Croisement avec tes traces…'); await new Promise(r => setTimeout(r, 0));
     const net = buildNetwork(ways, fog, { radius });
+    say('Calcul des itinéraires…'); await new Promise(r => setTimeout(r, 0));
     const g = new Graph(net, { charm: $('#charm').checked });
     const a = g.nearest(...pts.from);
     if (a.dist > 300) throw new Error('Aucune rue piétonne près du départ.');
@@ -694,6 +782,29 @@ $('#fogSel').value = fogStyle;
 $('#fogSel').onchange = e => { fogStyle = e.target.value; ls.set('fogStyle', fogStyle); fogLayer.redraw(); };
 $('#baseSel').value = BASES[ls.get('base')] ? ls.get('base') : 'epure';
 $('#baseSel').onchange = e => { ls.set('base', e.target.value); setBase(); };
+async function dataUi() {
+  const m = await getManifest(), el = $('#dataInfo'), btn = $('#dlAll');
+  if (!m) { el.textContent = "Rues téléchargées à la demande depuis OpenStreetMap (les données hors ligne de toute l'Île-de-France ne sont pas encore publiées)."; btn.hidden = true; return; }
+  const all = ls.get('allDownloaded') === m.date;
+  el.textContent = `Rues OpenStreetMap du ${new Date(m.date).toLocaleDateString('fr-FR')} · ${m.ways.toLocaleString('fr-FR')} voies · ${(m.bytes / 1e6).toFixed(0)} Mo pour toute l'Île-de-France.` + (all ? ' Tout est sur ce téléphone ✓' : ' Les zones regardées sont gardées sur le téléphone.');
+  btn.hidden = all; btn.textContent = `Tout télécharger maintenant (${(m.bytes / 1e6).toFixed(0)} Mo, une seule fois)`;
+}
+$('#dlAll').onclick = async () => {
+  const btn = $('#dlAll'); btn.disabled = true;
+  try { await downloadAll((d, t, b, tb) => (btn.textContent = `Téléchargement… ${Math.round(100 * b / tb)} % (${(b / 1e6).toFixed(0)}/${(tb / 1e6).toFixed(0)} Mo)`)); toast("Toutes les rues d'Île-de-France sont sur ton téléphone."); }
+  catch (e) { toast(e.message, true); }
+  btn.disabled = false; dataUi();
+};
+dataUi();
+$('#prefetch').onclick = () => locate(async ll => {
+  const btn = $('#prefetch'), bbox = padBbox([ll], 5000);
+  btn.disabled = true;
+  try {
+    await getWays(bbox, null, (d, t) => (btn.textContent = `Téléchargement… ${d}/${t} zones`));
+    btn.textContent = 'Rues à 5 km autour de toi prêtes ✓';
+  } catch (e) { btn.textContent = 'Réessayer le préchargement'; toast(e.message, true); }
+  btn.disabled = false;
+});
 $('#tol').value = radius; $('#tolV').textContent = Math.round(radius * 6);
 $('#tol').oninput = e => { radius = +e.target.value; $('#tolV').textContent = Math.round(radius * 6); };
 $('#tol').onchange = () => { ls.set('tol', radius); if (current) analyze(current, false); };
@@ -732,4 +843,9 @@ function redrawAll() { fogLayer.redraw(); if (current) analyze(current, false); 
   }
 })();
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
+  // a new version took over: reload once so the screen shows it
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded && navigator.serviceWorker.controller) { reloaded = true; location.reload(); } });
+}

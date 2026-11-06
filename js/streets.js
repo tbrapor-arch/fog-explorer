@@ -3,6 +3,7 @@
 
 const OVERPASS = [
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
@@ -18,19 +19,66 @@ way["highway"~"^(${ROADS}|${PATHS})$"]["access"!~"^(private|no)$"]["foot"!~"^(no
 out body geom qt;`;
 }
 
-export async function fetchWays(bbox, signal) {
+// Asks the main server; if it hasn't answered after 7 s, also asks a mirror and keeps the first answer.
+export async function fetchWays(bbox) {
   const body = 'data=' + encodeURIComponent(overpassQuery(bbox));
-  let lastErr;
-  for (const url of OVERPASS) {
-    try {
-      const r = await fetch(url, { method: 'POST', body, signal,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-      if (!r.ok) throw new Error('Overpass ' + r.status);
-      const j = await r.json();
-      return j.elements.filter(e => e.type === 'way' && e.geometry && e.nodes);
-    } catch (e) { if (signal?.aborted) throw e; lastErr = e; }
+  const ask = url => fetch(url, { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })
+    .then(r => { if (!r.ok) throw new Error('Overpass ' + r.status); return r.json(); })
+    .then(j => j.elements.filter(e => e.type === 'way' && e.geometry && e.nodes));
+  const tries = [];
+  const race = new Promise((resolve, reject) => {
+    let failed = 0, idx = 0, timer;
+    const next = () => {
+      if (idx >= OVERPASS.length) return;
+      const p = ask(OVERPASS[idx++]);
+      tries.push(p);
+      p.then(resolve, () => { if (++failed >= OVERPASS.length) reject(new Error('serveurs indisponibles')); else next(); });
+    };
+    next();
+    timer = setTimeout(next, 7000);
+    race.finally?.(() => clearTimeout(timer));
+  });
+  try { return await race; }
+  catch (e) { throw new Error("Impossible de charger les rues d'OpenStreetMap (" + e.message + '). Réessaie dans une minute.'); }
+}
+
+// Street data is cached by cells of ~2.2 x 2.2 km, so communes and routes share what was already
+// downloaded and a second visit to an area is instant.
+export const CELL_LAT = 0.02, CELL_LON = 0.03;
+export function cellsFor([s, w, n, e]) {
+  const out = [];
+  for (let x = Math.floor(w / CELL_LON); x <= Math.floor(e / CELL_LON); x++)
+    for (let y = Math.floor(s / CELL_LAT); y <= Math.floor(n / CELL_LAT); y++)
+      out.push({ key: x + ',' + y, bbox: [y * CELL_LAT, x * CELL_LON, (y + 1) * CELL_LAT, (x + 1) * CELL_LON] });
+  return out;
+}
+
+// ---- street data published with the app (built monthly by tools/build_streets.py) ----
+export async function gunzipJSON(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return JSON.parse(await new Response(stream).text());
+}
+// tile JSON -> Overpass-like ways, keeping only ways with a node inside bbox
+export function decodeTile(t, bbox) {
+  const [s, w, n, e] = bbox, out = [];
+  for (const [id, h, ni, width, ids, cs] of t.w) {
+    const nodes = new Array(ids.length), geometry = new Array(ids.length);
+    let pid = 0, x = 0, y = 0, inside = !bbox;
+    for (let i = 0; i < ids.length; i++) {
+      pid += ids[i]; x += cs[2 * i]; y += cs[2 * i + 1];
+      const lon = x / 1e5, lat = y / 1e5;
+      nodes[i] = pid; geometry[i] = { lon, lat };
+      if (!inside && lat >= s && lat <= n && lon >= w && lon <= e) inside = true;
+    }
+    if (inside) out.push({ id, nodes, geometry, tags: { highway: t.h[h], name: ni >= 0 ? t.n[ni] : undefined, width: width || undefined } });
   }
-  throw new Error("Impossible de charger les rues d'OpenStreetMap (" + (lastErr?.message || 'réseau') + '). Réessaie dans une minute.');
+  return out;
+}
+export function tilesFor([s, w, n, e], TL, TO) {
+  const out = [];
+  for (let x = Math.floor(w / TO); x <= Math.floor(e / TO); x++)
+    for (let y = Math.floor(s / TL); y <= Math.floor(n / TL); y++) out.push(x + '_' + y);
+  return out;
 }
 
 // Rail and metro stations around an area (RER, Transilien, métro, tram)

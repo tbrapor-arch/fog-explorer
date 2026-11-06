@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://server.arcgisonline.com https://tile.openstreetmap.org https://*.tile.openstreetmap.fr; connect-src 'self' https://overpass-api.de https://overpass.private.coffee https://maps.mail.ru https://geo.api.gouv.fr https://data.geopf.fr https://api-adresse.data.gouv.fr https://api.dropboxapi.com https://content.dropboxapi.com; worker-src 'self' blob:; base-uri 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://server.arcgisonline.com https://tile.openstreetmap.org https://*.tile.openstreetmap.fr; connect-src 'self' https://overpass-api.de https://overpass.kumi.systems https://overpass.private.coffee https://maps.mail.ru https://geo.api.gouv.fr https://data.geopf.fr https://api-adresse.data.gouv.fr https://api.dropboxapi.com https://content.dropboxapi.com; worker-src 'self' blob:; base-uri 'none'; object-src 'none'">
 <meta name="referrer" content="strict-origin">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#ffffff">
@@ -123,6 +123,11 @@
         <li>Copie l'<b>App key</b> ici et touche <b>Connecter Dropbox</b>.</li>
       </ol>
     </details>
+
+    <h3>Rues hors ligne</h3>
+    <p class="muted small" id="dataInfo">…</p>
+    <button id="dlAll" class="btn primary" hidden>Tout télécharger</button>
+    <button id="prefetch" class="btn ghost small">Précharger seulement 5 km autour de moi</button>
 
     <h3>Réglages</h3>
     <div class="field"><label for="fogSel">Affichage de mes traces</label>
