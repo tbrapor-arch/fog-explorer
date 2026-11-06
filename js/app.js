@@ -646,6 +646,7 @@ async function syncDropbox() {
     const cache = (await idbGet('dbxCache')) || {};
     const r = await dbx.sync(cache, msg => chip(msg, 'busy'));
     await idbSet('dbxCache', r.cache);
+    $('#dbxFolder').value = dbx.folder();
     fogMeta = { source: 'Dropbox, ' + r.source, date: r.date };
     await setFog(r.fog, fogMeta);
     toast('Traces à jour depuis Dropbox.');

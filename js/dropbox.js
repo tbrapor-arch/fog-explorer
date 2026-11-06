@@ -68,7 +68,7 @@ async function rpc(path, body) {
   const r = await fetch(API + path, { method: 'POST', headers: { Authorization: 'Bearer ' + await token(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!r.ok) {
     const t = await r.text();
-    if (t.includes('not_found')) throw new Error(`Dossier introuvable dans ton Dropbox : « ${body.path || folder()} ». Vérifie le chemin dans Données.`);
+    if (t.includes('not_found')) { const e = new Error(`Dossier introuvable dans ton Dropbox : « ${body.path || folder()} ».`); e.notFound = true; throw e; }
     throw new Error('Dropbox : ' + r.status + ' ' + t.slice(0, 120));
   }
   return r.json();
@@ -91,8 +91,33 @@ async function listAll(path) {
 //  1. if the folder holds the app's live "Sync" tiles, read them all (always the freshest data);
 //  2. otherwise take the most recent .fwss snapshot.
 // cache: { [path]: { hash, tile:Uint8Array, id } } so unchanged files are not downloaded again.
+// Finds the Fog of World folder wherever it is (Dropbox names "Apps" "Applications" in French, etc.)
+async function discover() {
+  const found = new Set();
+  const r = await rpc('/files/search_v2', { query: 'Fog of World', options: { filename_only: true, max_results: 50 } });
+  for (const m of r.matches || []) {
+    const md = m.metadata?.metadata;
+    if (md?.['.tag'] === 'folder' && /fog of world$/i.test(md.name)) found.add(md.path_display);
+  }
+  if (!found.size) {
+    const r2 = await rpc('/files/search_v2', { query: 'Snapshot', options: { filename_only: true, max_results: 50, file_extensions: ['fwss'] } });
+    for (const m of r2.matches || []) { const md = m.metadata?.metadata; if (md?.path_display) found.add(md.path_display.replace(/\/[^/]+$/, '')); }
+  }
+  // shortest path = the app's root folder
+  return [...found].sort((a, b) => a.length - b.length)[0] || null;
+}
+
 export async function sync(cache = {}, onProgress = () => {}) {
-  const files = await listAll(folder());
+  let files;
+  try { files = await listAll(folder()); }
+  catch (e) {
+    if (!e.notFound) throw e;
+    onProgress('Recherche du dossier Fog of World…');
+    const f = await discover();
+    if (!f) throw new Error("Je ne trouve pas de dossier Fog of World dans ton Dropbox. Dans Fog of World, active la synchro Dropbox (onglet nuage) ou envoie un snapshot sur Dropbox, puis réessaie.");
+    setFolder(f);
+    files = await listAll(f);
+  }
   const tiles = files.filter(f => tileIdFromName(f.name) !== null && !/\.fwss$/i.test(f.name) && /\/sync\//i.test(f.path_lower));
   if (tiles.length) {
     const fog = new FogMap(), next = {};
