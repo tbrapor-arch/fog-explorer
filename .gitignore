@@ -1,0 +1,7 @@
+# Never commit personal location data
+*.fwss
+*.gpx
+Sync/
+data/
+*.png
+!vendor/images/*.png

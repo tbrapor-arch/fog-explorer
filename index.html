@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.basemaps.cartocdn.com; connect-src 'self' https://overpass-api.de https://overpass.private.coffee https://maps.mail.ru https://geo.api.gouv.fr https://data.geopf.fr https://api-adresse.data.gouv.fr https://api.dropboxapi.com https://content.dropboxapi.com; worker-src 'self' blob:; base-uri 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#0d1117">
+<title>Fog Explorer</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="map" aria-label="Carte"></div>
+
+<div id="chip" class="chip" role="status"><span class="dot"></span><span id="chipText">Aucune donnée chargée</span></div>
+<div id="legend" class="legend" hidden>
+  <span><i class="sw new"></i>à découvrir</span>
+  <span><i class="sw done"></i>déjà fait</span>
+  <span><i class="sw path"></i>chemin</span>
+</div>
+<div id="toast" class="toast" role="alert" hidden></div>
+
+<section id="sheet" class="sheet" aria-label="Panneau">
+  <button id="grip" class="grip" aria-label="Agrandir ou réduire le panneau"><span></span></button>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="commune" aria-selected="true">Commune</button>
+    <button role="tab" data-tab="route">Itinéraire</button>
+    <button role="tab" data-tab="data">Données</button>
+  </nav>
+
+  <!-- COMMUNE -->
+  <div class="pane" data-pane="commune">
+    <div class="row">
+      <div class="field grow">
+        <label for="communeQ">Commune ou arrondissement</label>
+        <input id="communeQ" type="search" placeholder="Villejuif, Paris 13e…" autocomplete="off">
+        <ul id="communeList" class="suggest" hidden></ul>
+      </div>
+      <button id="communeHere" class="btn ghost" title="Commune où je suis">Ici</button>
+    </div>
+    <button id="viewHere" class="btn ghost small">Analyser la zone affichée</button>
+    <div id="communeOut"></div>
+  </div>
+
+  <!-- ROUTE -->
+  <div class="pane" data-pane="route" hidden>
+    <div class="seg" role="radiogroup" aria-label="Type d'itinéraire">
+      <button id="modeAB" class="on" role="radio" aria-checked="true">De A à B</button>
+      <button id="modeLoop" role="radio" aria-checked="false">Boucle</button>
+    </div>
+    <div class="field">
+      <label for="fromQ">Départ</label>
+      <div class="row">
+        <input id="fromQ" type="search" placeholder="Adresse" autocomplete="off">
+        <button class="btn ghost small" data-gps="from" title="Ma position">GPS</button>
+        <button class="btn ghost small" data-pick="from" title="Toucher la carte">Carte</button>
+      </div>
+      <ul class="suggest" data-for="fromQ" hidden></ul>
+    </div>
+    <div class="field" id="toField">
+      <label for="toQ">Arrivée</label>
+      <div class="row">
+        <input id="toQ" type="search" placeholder="Adresse" autocomplete="off">
+        <button class="btn ghost small" data-gps="to" title="Ma position">GPS</button>
+        <button class="btn ghost small" data-pick="to" title="Toucher la carte">Carte</button>
+      </div>
+      <ul class="suggest" data-for="toQ" hidden></ul>
+    </div>
+    <div class="field" id="loopField" hidden>
+      <label for="loopKm">Distance de la boucle : <b id="loopKmV">5</b> km</label>
+      <input id="loopKm" type="range" min="2" max="12" step="0.5" value="5">
+    </div>
+    <button id="go" class="btn primary">Trouver des rues nouvelles</button>
+    <div id="routeOut"></div>
+  </div>
+
+  <!-- DATA -->
+  <div class="pane" data-pane="data" hidden>
+    <h3>Mes données Fog of World</h3>
+    <p id="dataStatus" class="muted">Aucune donnée.</p>
+    <label class="btn primary file">Charger un snapshot (.fwss)
+      <input id="fileIn" type="file" accept=".fwss,application/zip,application/octet-stream" hidden>
+    </label>
+
+    <h3>Synchro automatique Dropbox</h3>
+    <p class="muted" id="dbxStatus">Non connecté.</p>
+    <div class="field"><label for="dbxKey">Clé de ton app Dropbox (App key)</label><input id="dbxKey" autocomplete="off" spellcheck="false" placeholder="ex. a1b2c3d4e5f6g7h"></div>
+    <div class="field"><label for="dbxFolder">Dossier Fog of World dans Dropbox</label><input id="dbxFolder" spellcheck="false"></div>
+    <label class="check"><input type="checkbox" id="dbxAuto" checked> Synchroniser à chaque ouverture</label>
+    <div class="row wrap">
+      <button id="dbxConnect" class="btn">Connecter Dropbox</button>
+      <button id="dbxSync" class="btn" hidden>Synchroniser</button>
+      <button id="dbxOff" class="btn ghost" hidden>Déconnecter</button>
+    </div>
+    <details class="howto">
+      <summary>Créer la clé Dropbox (2 min, une seule fois)</summary>
+      <ol>
+        <li>Va sur <a href="https://www.dropbox.com/developers/apps/create" target="_blank" rel="noopener noreferrer">dropbox.com/developers/apps/create</a>.</li>
+        <li>Choisis <b>Scoped access</b>, puis <b>Full Dropbox</b> (Fog of World écrit dans son propre dossier, une app limitée à « App folder » ne le verrait pas). Donne un nom, par ex. <code>fog-explorer-perso</code>.</li>
+        <li>Onglet <b>Permissions</b> : coche seulement <code>files.metadata.read</code> et <code>files.content.read</code> (lecture seule), puis <b>Submit</b>.</li>
+        <li>Onglet <b>Settings</b> : dans <b>Redirect URIs</b>, ajoute <code id="redir"></code>. Laisse l'app en mode « Development » : elle ne servira qu'à toi.</li>
+        <li>Copie l'<b>App key</b> ici et touche <b>Connecter Dropbox</b>.</li>
+      </ol>
+    </details>
+
+    <h3>Réglages</h3>
+    <div class="field"><label for="tol">Tolérance GPS : <b id="tolV">12</b> m</label><input id="tol" type="range" min="1" max="4" step="1" value="2"></div>
+    <p class="muted small">Une rue compte comme faite si au moins 60 % de sa longueur est à moins de cette distance d'une de tes traces.</p>
+
+    <h3>Confidentialité</h3>
+    <ul class="privacy">
+      <li>Tes traces sont lues et analysées <b>uniquement sur cet appareil</b>. Elles ne sont envoyées nulle part et ne sont pas dans le code du site.</li>
+      <li>Les services de carte (OpenStreetMap/Overpass, CARTO, geo.api.gouv.fr, Géoplateforme IGN) reçoivent seulement la zone affichée ou l'adresse tapée, comme n'importe quelle appli de carte.</li>
+      <li>Dropbox : accès en lecture seule, jeton gardé dans ce navigateur.</li>
+      <li>Aucune statistique, aucun cookie, aucun traceur.</li>
+    </ul>
+    <button id="wipe" class="btn danger">Effacer toutes mes données de cet appareil</button>
+    <p id="wipeConfirm" class="confirm" hidden>Sûr ? Tes traces, la connexion Dropbox et le cache seront supprimés de ce navigateur.
+      <button id="wipeYes" class="btn danger small">Oui, effacer</button> <button id="wipeNo" class="btn ghost small">Annuler</button></p>
+  </div>
+</section>
+
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/jszip.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
