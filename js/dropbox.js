@@ -118,7 +118,14 @@ export async function sync(cache = {}, onProgress = () => {}) {
     setFolder(f);
     files = await listAll(f);
   }
-  const tiles = files.filter(f => tileIdFromName(f.name) !== null && !/\.fwss$/i.test(f.name)); // the app's live sync files, wherever they are
+  let tiles = files.filter(f => tileIdFromName(f.name) !== null && !/\.fwss$/i.test(f.name)); // the app's live sync files, wherever they are
+  // the saved folder may be a sub-folder (e.g. where snapshots go): look again from the app's root folder
+  const m = folder().match(/^(.*?\/fog of world)(\/.+)$/i);
+  if (!tiles.length && m) {
+    onProgress('Recherche de la synchro dans ' + m[1] + '…');
+    files = await listAll(m[1]); setFolder(m[1]);
+    tiles = files.filter(f => tileIdFromName(f.name) !== null && !/\.fwss$/i.test(f.name));
+  }
   const byDir = new Map();
   for (const f of files) { const d = f.path_display.split('/').slice(0, -1).join('/') || '/'; const e = byDir.get(d) || { n: 0, ex: [] }; e.n++; if (e.ex.length < 2) e.ex.push(f.name); byDir.set(d, e); }
   const dirs = [...byDir.entries()].slice(0, 10).map(([d, e]) => `${d} (${e.n} : ${e.ex.join(', ')})`);
