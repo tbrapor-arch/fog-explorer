@@ -1,6 +1,6 @@
 // Caches only the app's own code so it opens offline and installs as an app.
 // Never caches your traces, map tiles, streets or anything from another site.
-const CACHE = 'fog-explorer-v15';
+const CACHE = 'fog-explorer-v16';
 const SHELL = ['./', 'index.html', 'style.css', 'manifest.webmanifest', 'icon.svg', 'icon-192.png',
   'js/app.js', 'js/fog.js', 'js/streets.js', 'js/route.js', 'js/store.js', 'js/dropbox.js', 'js/network.js',
   'vendor/leaflet.js', 'vendor/leaflet.css', 'vendor/jszip.min.js', 'geo/departements-idf.geojson'];
