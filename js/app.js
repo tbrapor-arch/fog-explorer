@@ -116,13 +116,34 @@ async function setFog(f, meta) {
 }
 
 // tabs + sheet
-$$('.tabs button').forEach(b => b.onclick = () => {
-  $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x === b));
-  $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== b.dataset.tab));
-  $('#sheet').classList.remove('min');
-});
+// Each tab shows only its own layers on the map, with its own legend.
+let curTab = 'commune';
+const legendFor = {};
+function setLegend(tab, html) { if (html !== undefined) legendFor[tab] = html; if (tab !== curTab) return; const h = legendFor[curTab]; $('#legend').hidden = !h; if (h) $('#legend').innerHTML = h; }
+function tabLayers() {
+  const want = {
+    commune: [streetsLayer, outlineLayer, hlLayer],
+    route: [routeLayer, markerLayer],
+    idf: [conquestLayer, netFogLayer, netLayer],
+    data: [],
+  }[curTab] || [];
+  const all = [streetsLayer, outlineLayer, hlLayer, routeLayer, markerLayer, conquestLayer, netFogLayer, netLayer];
+  for (const l of all) {
+    const on = want.includes(l) && (l === conquestLayer ? conquestOn : l === netFogLayer || l === netLayer ? netOn : true);
+    if (on && !map.hasLayer(l)) map.addLayer(l); else if (!on && map.hasLayer(l)) map.removeLayer(l);
+  }
+  setLegend(curTab);
+}
+function selectTab(t) {
+  curTab = t;
+  $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === t));
+  $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== t));
+  tabLayers();
+  if (t === 'idf' && fog && !conquestOn) showConquest(true);
+}
+$$('.tabs button').forEach(b => b.onclick = () => { selectTab(b.dataset.tab); $('#sheet').classList.remove('min'); });
 $('#grip').onclick = () => $('#sheet').classList.toggle('min');
-const showTab = t => $(`.tabs button[data-tab="${t}"]`).click();
+const showTab = t => { selectTab(t); $('#sheet').classList.remove('min'); };
 
 // ---------------- streets / commune analysis ----------------
 let current = null;          // { name, geom?, bbox, ways }
@@ -243,7 +264,7 @@ function drawStreets(net, filter) {
     state = s.done; lastB = s.b; lastW = s.w;
   }
   flush();
-  $('#legend').innerHTML = legendStreets; $('#legend').hidden = false;
+  setLegend('commune', legendStreets);
 }
 
 async function analyze(area, fitView = true) {
@@ -425,10 +446,9 @@ function drawConquest(refit = false) {
       ${unknown ? `<button id="conquestCalc" class="btn small">Mettre à jour ${unknown} commune${unknown > 1 ? 's' : ''} avec de nouvelles traces</button>` : '<span class="muted small">Tout est à jour ✓</span>'}
     </div>
     <p id="conquestProg" class="muted small" hidden></p>`;
-  $('#legend').innerHTML = conqView === 'visit'
+  setLegend('idf', conqView === 'visit'
     ? `<span><i class="sq" style="background:${cVis}"></i>visitée</span><span><i class="sq" style="background:${cNo}"></i>pas encore</span>`
-    : LEVELS.slice(1).map((l, i) => `<span><i class="sq" style="background:${cols[i + 1]}"></i>${l.toLowerCase()}</span>`).join('');
-  $('#legend').hidden = false;
+    : LEVELS.slice(1).map((l, i) => `<span><i class="sq" style="background:${cols[i + 1]}"></i>${l.toLowerCase()}</span>`).join(''));
   $('#conqDept').onchange = e => { conqDept = e.target.value; ls.set('conqDept', conqDept); drawConquest(true); };
   $('#cvVisit').onclick = () => { conqView = 'visit'; ls.set('conqView', conqView); drawConquest(); };
   $('#cvLevels').onclick = () => { conqView = 'levels'; ls.set('conqView', conqView); drawConquest(); };
@@ -441,7 +461,7 @@ function drawConquest(refit = false) {
 map.createPane('net').style.zIndex = 420;
 const netLayer = L.layerGroup();
 const NetFog = L.GridLayer.extend({ createTile(c) { return paintFog(c, netFog, '#7b3fe4', 0.85); } });
-let netFog = null, netRes = null;
+let netFog = null, netRes = null, netOn = false;
 const netFogLayer = new NetFog({ pane: 'net', maxZoom: 19 });
 async function communeAt(lon, lat) {
   try { await loadIdf(); } catch (e) { return null; }
@@ -455,10 +475,8 @@ async function showNetwork(i = 0) {
   if (!netRes || netRes.fog !== fog) netRes = { fog, ...largestNetworks(fog, { gap: 2 }) };
   const c = netRes.comps[i];
   if (!c) { $('#netOut').innerHTML = '<p class="muted">Pas assez de traces.</p>'; return; }
-  streetsLayer.clearLayers(); outlineLayer.clearLayers(); routeLayer.clearLayers(); hlLayer.clearLayers();
-  $('#legend').innerHTML = '<span><i class="sq" style="background:#7b3fe4"></i>ce réseau</span><span><i class="sq" style="background:#2b7fd4"></i>le reste de tes traces</span>'; $('#legend').hidden = false;
-  netFog = c.map; netFogLayer.addTo(map); netFogLayer.redraw();
-  netLayer.clearLayers().addTo(map);
+  setLegend('idf', '<span><i class="sq" style="background:#7b3fe4"></i>ce réseau</span><span><i class="sq" style="background:#2b7fd4"></i>le reste de tes traces</span>');
+  netFog = c.map; netOn = true; netLayer.clearLayers(); tabLayers(); netFogLayer.redraw();
   const A = [c.a[1], c.a[0]], B = [c.b[1], c.b[0]];
   L.polyline([A, B], { pane: 'net', color: '#7b3fe4', weight: 3, dashArray: '8 6', interactive: false }).addTo(netLayer);
   for (const p of [A, B]) L.circleMarker(p, { pane: 'net', radius: 7, color: '#fff', weight: 3, fillColor: '#7b3fe4', fillOpacity: 1 }).addTo(netLayer);
@@ -476,7 +494,7 @@ async function showNetwork(i = 0) {
     <button id="netHide" class="btn small ghost">Masquer</button></div>
     <p class="muted small">Un réseau = des zones explorées reliées sans interruption. Une coupure GPS de moins de ~12 m ne casse pas le réseau.</p>`;
   $$('[data-net]').forEach(b => b.onclick = () => showNetwork(+b.dataset.net));
-  $('#netHide').onclick = () => { netFogLayer.remove(); netLayer.remove(); $('#netOut').innerHTML = '<button id="netBtn" class="btn">Calculer mon plus grand réseau</button>'; $('#netBtn').onclick = () => showNetwork(); };
+  $('#netHide').onclick = () => { netOn = false; tabLayers(); if (conquestOn) drawConquest(); $('#netOut').innerHTML = '<button id="netBtn" class="btn">Calculer mon plus grand réseau</button>'; $('#netBtn').onclick = () => showNetwork(); };
 }
 $('#netBtn').onclick = () => showNetwork();
 
@@ -500,20 +518,20 @@ function drawComTable(feats) {
   $$('#comTable li[data-code]').forEach(li => li.onclick = () => { const f = idfFeats.find(x => x.code === li.dataset.code); showTab('commune'); $('#communeQ').value = f.nom; openCommune(f.code); });
 }
 function hideConquest() {
-  conquestOn = false; conquestLayer.remove(); mapBtn?.classList.remove('on');
-  $('#legend').innerHTML = legendStreets; $('#legend').hidden = !streetsLayer.getLayers().length;
+  conquestOn = false; tabLayers(); mapBtn?.classList.remove('on');
+  setLegend('idf', '');
   $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Afficher la carte de mes communes</button>'; $('#conquestBtn').onclick = () => showConquest();
 }
 async function showConquest(fromMap = false) {
   if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); showTab('data'); return; }
-  if (!fromMap) showTab('idf'); else $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === 'idf')), $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== 'idf'));
+  if (curTab !== 'idf') { curTab = 'idf'; $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === 'idf')); $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== 'idf')); }
   $('#conquest').innerHTML = '<p class="muted"><span class="spin"></span> Chargement des 1 300 communes…</p>';
   $('#conquest').scrollIntoView({ block: 'nearest' });
   try {
     await loadIdf();
     if (!deptGeo) deptGeo = await fetch('geo/departements-idf.geojson').then(r => r.json()).catch(() => null);
     if (!touched) touched = computeTouched();
-    conquestOn = true; conquestLayer.addTo(map); mapBtn?.classList.add('on');
+    conquestOn = true; mapBtn?.classList.add('on'); tabLayers();
     drawConquest(true);
     if (!deptGeo) fit(L.latLngBounds([[48.12, 1.45], [49.24, 3.56]]));
   } catch (e) { hideConquest(); toast('Limites des communes indisponibles pour le moment.', true); }
@@ -525,7 +543,7 @@ map.getContainer().classList.toggle('zlo', map.getZoom() < 11);
 let mapBtn = null;
 L.Control.Conq = L.Control.extend({ onAdd() {
   const b = L.DomUtil.create('button', 'mapbtn'); b.type = 'button'; b.textContent = 'IDF'; b.title = 'Carte de mes communes';
-  L.DomEvent.disableClickPropagation(b); b.onclick = () => { if (conquestOn) return hideConquest(); if (matchMedia('(max-width: 819px)').matches) $('#sheet').classList.add('min'); showConquest(true); };
+  L.DomEvent.disableClickPropagation(b); b.onclick = () => { if (curTab === 'idf' && conquestOn) { selectTab('commune'); return; } if (matchMedia('(max-width: 819px)').matches) $('#sheet').classList.add('min'); selectTab('idf'); if (!conquestOn) showConquest(true); };
   return (mapBtn = b);
 } });
 new L.Control.Conq({ position: 'topright' }).addTo(map);
@@ -777,7 +795,7 @@ $('#go').onclick = async () => {
       routes = routesAB(g, a.node, b.node) || [];
     }
     if (!routes.length) throw new Error('Pas d\'itinéraire trouvé. Essaie une autre distance ou un autre départ.');
-    streetsLayer.clearLayers(); $('#legend').hidden = true; outlineLayer.clearLayers(); hlLayer.clearLayers();
+    // route tab shows only routes; the commune view keeps its own layers
     const base = routes[0].len;
     out.innerHTML = routes.map((r, i) => `
       <div class="card" data-i="${i}">
@@ -818,8 +836,7 @@ function selectRoute(i) {
     L.marker(ll(at), { icon: L.divIcon({ className: '', iconSize: [0, 0], html: `<span class="rlab${j === i ? ' on' : ''}">${esc(x.label)} · ${km(x.len)}</span>` }) })
       .on('click', () => selectRoute(j)).addTo(routeLayer);
   });
-  $('#legend').innerHTML = `<span><i class="sw new" style="border-top-width:5px"></i>nouveau</span><span><i class="sw done" style="border-top-width:5px"></i>déjà fait</span><span><i class="sw" style="border-color:${css('--muted')};border-top-style:dotted"></i>autres variantes</span>`;
-  $('#legend').hidden = false;
+  setLegend('route', `<span><i class="sw new" style="border-top-width:5px"></i>nouveau</span><span><i class="sw done" style="border-top-width:5px"></i>déjà fait</span>${routes.length > 1 ? `<span><i class="sw" style="border-color:${css('--muted')};border-top-style:dotted"></i>autres variantes</span>` : ''}`);
   fit(L.latLngBounds(routes.flatMap(x => x.coords.map(ll))));
   $$('#routeOut .card').forEach(c => c.classList.toggle('sel', +c.dataset.i === i));
 }
@@ -923,7 +940,7 @@ $('#wipeYes').onclick = async () => {
   await wipeAll();
   fog = null; fogMeta = null; current = null; routes = []; pcts = {}; touched = null; idfFeats = null; hideConquest();
   [streetsLayer, outlineLayer, routeLayer, markerLayer, hlLayer].forEach(l => l.clearLayers());
-  fogLayer.redraw(); $('#communeOut').innerHTML = ''; $('#routeOut').innerHTML = ''; $('#legend').hidden = true;
+  fogLayer.redraw(); $('#communeOut').innerHTML = ''; $('#routeOut').innerHTML = ''; for (const k in legendFor) delete legendFor[k]; $('#legend').hidden = true;
   $('#wipeConfirm').hidden = true; $('#dbxKey').value = ''; dbxUi(); fogStatus(null);
   toast('Toutes tes données ont été effacées de cet appareil.');
 };
