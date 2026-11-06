@@ -133,3 +133,11 @@ code { font: 12px var(--mono); background: var(--panel); padding: 1px 5px; borde
 .levels i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
 :root { --lv0: #3a4352; --lv1: #5b4a2a; --lv2: #9a6a1e; --lv3: #e0a020; --lv4: #4fb3d9; --lv5: #9be7ff; }
 @media (prefers-color-scheme: light) { :root { --lv0: #d7dde5; --lv1: #f6e2b8; --lv2: #f0c060; --lv3: #e08a10; --lv4: #2a9fd0; --lv5: #0b5f85; } }
+
+.sq { display: inline-block; width: 11px; height: 11px; border-radius: 3px; }
+.legend { flex-wrap: wrap; max-width: calc(100% - 90px); }
+.dlab { position: absolute; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; font: 12px var(--font); white-space: nowrap; transform: translate(-50%, -50%); font-variant-numeric: tabular-nums; box-shadow: var(--shadow); }
+.mapbtn { width: 34px; height: 34px; border-radius: 8px; border: 2px solid rgba(0,0,0,.2); background: #fff; color: #222; font: 700 11px var(--font); cursor: pointer; }
+.mapbtn.on { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+#deptList .s .bar { display: block; height: 5px; }
+.zlo .dlab.pc { display: none; }

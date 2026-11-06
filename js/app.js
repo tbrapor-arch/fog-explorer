@@ -16,7 +16,7 @@ let radius = +(ls.get('tol') || 2);
 
 // ---------------- map ----------------
 const light = matchMedia('(prefers-color-scheme: light)');
-const map = L.map('map', { zoomControl: false, preferCanvas: true, attributionControl: true }).setView([48.8566, 2.3522], 12);
+const map = L.map('map', { zoomControl: false, preferCanvas: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 0.5 }).setView([48.8566, 2.3522], 12);
 L.control.zoom({ position: 'topright' }).addTo(map);
 let base;
 function setBase() {
@@ -254,41 +254,108 @@ const levelOf = code => {
   if (p !== undefined) return levelFromPct(p, (touched[code] || 0) >= 4);
   return (touched[code] || 0) >= 4 ? 1 : 0;
 };
-function drawConquest() {
+const DEPTS = { '75': 'Paris', '77': 'Seine-et-Marne', '78': 'Yvelines', '91': 'Essonne', '92': 'Hauts-de-Seine', '93': 'Seine-Saint-Denis', '94': 'Val-de-Marne', '95': "Val-d'Oise" };
+const deptOf = code => code.slice(0, 2);
+let conqDept = ls.get('conqDept') || 'all', conqView = ls.get('conqView') || 'visit', deptGeo = null;
+const legendStreets = $('#legend').innerHTML;
+const visited = code => levelOf(code) > 0;
+const pctTxt = (a, b) => (b ? Math.round(100 * a / b) : 0) + ' %';
+
+function drawConquest(refit = false) {
   conquestLayer.clearLayers();
   const cols = LEVELS.map((_, i) => css('--lv' + i)), n = LEVELS.map(() => 0);
-  for (const f of idfFeats) {
+  const feats = idfFeats.filter(f => conqDept === 'all' || deptOf(f.code) === conqDept);
+  const cVis = css('--done'), cNo = css('--lv0');
+  for (const f of feats) {
     const lv = levelOf(f.code); n[lv]++;
     const p = pcts[f.code]?.p;
-    L.geoJSON(f.geom, { pane: 'conq', renderer: conqRenderer, style: { color: css('--line'), weight: .6, fillColor: cols[lv], fillOpacity: lv ? .45 : .12 } })
-      .bindTooltip(`${esc(f.nom)} · ${p !== undefined ? Math.round(p * 100) + ' % des rues' : LEVELS[lv].toLowerCase()}`, { sticky: true })
+    const fill = conqView === 'visit' ? (lv ? cVis : cNo) : cols[lv];
+    L.geoJSON(f.geom, { pane: 'conq', renderer: conqRenderer, style: { color: css('--bg'), weight: .7, fillColor: fill, fillOpacity: lv ? .55 : .18 } })
+      .bindTooltip(`<b>${esc(f.nom)}</b><br>${lv ? (p !== undefined ? Math.round(p * 100) + ' % des rues · ' + LEVELS[lv].toLowerCase() : 'visitée (% non calculé)') : 'pas encore visitée'}`, { sticky: true })
       .on('click', () => { if (!conquestOn) return; $('#communeQ').value = f.nom; openCommune(f.code); })
       .addTo(conquestLayer);
   }
-  const unknown = idfFeats.filter(f => (touched[f.code] || 0) >= 4 && pcts[f.code] === undefined).length;
+  // department borders + labels
+  const per = {};
+  for (const f of idfFeats) { const d = deptOf(f.code); (per[d] ||= { n: 0, v: 0 }).n++; if (visited(f.code)) per[d].v++; }
+  if (deptGeo) {
+    const shown = deptGeo.features.filter(d => conqDept === 'all' || d.properties.code === conqDept);
+    const gj = L.geoJSON({ type: 'FeatureCollection', features: shown }, { pane: 'conq', renderer: conqRenderer, interactive: false, style: { color: css('--fg'), weight: 2.2, opacity: .8, fill: false } }).addTo(conquestLayer);
+    if (conqDept === 'all') gj.eachLayer(l => {
+      const c = l.feature.properties.code, st = per[c] || { n: 0, v: 0 };
+      L.marker(l.getBounds().getCenter(), { pane: 'conq', interactive: false, icon: L.divIcon({ className: '', html: `<span class="dlab${'75 92 93 94'.includes(c) ? ' pc' : ''}"><b>${c}</b> ${st.v}/${st.n}</span>`, iconSize: [0, 0] }) }).addTo(conquestLayer);
+    });
+    if (refit) fit(gj.getBounds());
+  }
+  const tot = feats.length, vis = feats.filter(f => visited(f.code)).length;
+  const unknown = feats.filter(f => (touched[f.code] || 0) >= 4 && pcts[f.code] === undefined).length;
+  const place = conqDept === 'all' ? "en Île-de-France" : (conqDept === '75' ? 'à Paris' : 'en ' + DEPTS[conqDept]);
   $('#conquest').innerHTML = `
-    <div class="levels">${LEVELS.map((l, i) => `<div><b>${n[i]}</b><span><i style="background:${cols[i]}"></i>${l}s</span></div>`).join('')}</div>
-    <p class="muted small">Sur ${idfFeats.length} communes et arrondissements, en % des km de rues faites : traversée &lt; 10 %, visitée 10–25 %, explorée 25–50 %, conquise 50–90 %, finie ≥ 90 %.</p>
+    <div class="row">
+      <select id="conqDept" class="grow" aria-label="Zone">
+        <option value="all">Toute l'Île-de-France</option>
+        ${Object.entries(DEPTS).map(([c, nm]) => `<option value="${c}" ${c === conqDept ? 'selected' : ''}>${c} · ${nm}</option>`).join('')}
+      </select>
+    </div>
+    <div class="seg" role="radiogroup" aria-label="Affichage">
+      <button id="cvVisit" class="${conqView === 'visit' ? 'on' : ''}" role="radio" aria-checked="${conqView === 'visit'}">Visitée ou non</button>
+      <button id="cvLevels" class="${conqView === 'levels' ? 'on' : ''}" role="radio" aria-checked="${conqView === 'levels'}">Niveaux</button>
+    </div>
+    <div class="stat">
+      <div class="big">${vis}<small>communes visitées sur ${tot} ${place}</small></div>
+      <div class="bar"><i style="width:${tot ? 100 * vis / tot : 0}%"></i></div>
+    </div>
+    ${conqView === 'levels' ? `<div class="levels">${LEVELS.map((l, i) => `<div><b>${n[i]}</b><span><i style="background:${cols[i]}"></i>${l}s</span></div>`).join('')}</div>
+    <p class="muted small">En % des km de rues faites : traversée &lt; 10 %, visitée 10–25 %, explorée 25–50 %, conquise 50–90 %, finie ≥ 90 %.</p>` : ''}
+    ${conqDept === 'all' ? `<ul class="list" id="deptList">${Object.entries(DEPTS).map(([c, nm]) => { const st = per[c] || { n: 0, v: 0 }; return `
+      <li data-d="${c}"><span class="n">${c} · ${esc(nm)}</span><span class="v">${st.v}/${st.n}</span>
+      <span class="s"><span class="bar"><i style="width:${st.n ? 100 * st.v / st.n : 0}%"></i></span></span></li>`; }).join('')}</ul>` : ''}
     <div class="row wrap">
       <button id="conquestHide" class="btn small">Masquer la carte</button>
-      ${unknown ? `<button id="conquestCalc" class="btn small">Calculer le % de ${unknown} communes traversées</button>` : ''}
+      ${unknown ? `<button id="conquestCalc" class="btn small">Calculer le % de ${unknown} communes visitées</button>` : ''}
     </div>
     <p id="conquestProg" class="muted small" hidden></p>`;
-  $('#conquestHide').onclick = () => { conquestOn = false; conquestLayer.remove(); $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Carte de mes communes</button>'; $('#conquestBtn').onclick = showConquest; };
+  $('#legend').innerHTML = conqView === 'visit'
+    ? `<span><i class="sq" style="background:${cVis}"></i>visitée</span><span><i class="sq" style="background:${cNo}"></i>pas encore</span>`
+    : LEVELS.slice(1).map((l, i) => `<span><i class="sq" style="background:${cols[i + 1]}"></i>${l.toLowerCase()}</span>`).join('');
+  $('#legend').hidden = false;
+  $('#conqDept').onchange = e => { conqDept = e.target.value; ls.set('conqDept', conqDept); drawConquest(true); };
+  $('#cvVisit').onclick = () => { conqView = 'visit'; ls.set('conqView', conqView); drawConquest(); };
+  $('#cvLevels').onclick = () => { conqView = 'levels'; ls.set('conqView', conqView); drawConquest(); };
+  $$('#deptList li').forEach(li => li.onclick = () => { conqDept = li.dataset.d; ls.set('conqDept', conqDept); drawConquest(true); });
+  $('#conquestHide').onclick = hideConquest;
   $('#conquestCalc')?.addEventListener('click', calcAll);
 }
-async function showConquest() {
-  if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); return; }
+function hideConquest() {
+  conquestOn = false; conquestLayer.remove(); mapBtn?.classList.remove('on');
+  $('#legend').innerHTML = legendStreets; $('#legend').hidden = !streetsLayer.getLayers().length;
+  $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Carte de mes communes</button>'; $('#conquestBtn').onclick = () => showConquest();
+}
+async function showConquest(fromMap = false) {
+  if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); showTab('data'); return; }
+  if (!fromMap) showTab('commune'); else $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === 'commune')), $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== 'commune'));
   $('#conquest').innerHTML = '<p class="muted"><span class="spin"></span> Chargement des 1 300 communes…</p>';
+  $('#conquest').scrollIntoView({ block: 'nearest' });
   try {
     await loadIdf();
+    if (!deptGeo) deptGeo = await fetch('geo/departements-idf.geojson').then(r => r.json()).catch(() => null);
     if (!touched) touched = computeTouched();
-    conquestOn = true; conquestLayer.addTo(map);
-    drawConquest();
-    fit(L.latLngBounds([[48.12, 1.45], [49.24, 3.56]]));
-  } catch (e) { $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Carte de mes communes</button>'; $('#conquestBtn').onclick = showConquest; toast('Limites des communes indisponibles pour le moment.', true); }
+    conquestOn = true; conquestLayer.addTo(map); mapBtn?.classList.add('on');
+    drawConquest(true);
+    if (!deptGeo) fit(L.latLngBounds([[48.12, 1.45], [49.24, 3.56]]));
+  } catch (e) { hideConquest(); toast('Limites des communes indisponibles pour le moment.', true); }
 }
-$('#conquestBtn').onclick = showConquest;
+$('#conquestBtn').onclick = () => showConquest();
+map.on('zoomend', () => map.getContainer().classList.toggle('zlo', map.getZoom() < 11));
+map.getContainer().classList.toggle('zlo', map.getZoom() < 11);
+// map button to open/close the commune map directly
+let mapBtn = null;
+L.Control.Conq = L.Control.extend({ onAdd() {
+  const b = L.DomUtil.create('button', 'mapbtn'); b.type = 'button'; b.textContent = 'IDF'; b.title = 'Carte de mes communes';
+  L.DomEvent.disableClickPropagation(b); b.onclick = () => { if (conquestOn) return hideConquest(); if (matchMedia('(max-width: 819px)').matches) $('#sheet').classList.add('min'); showConquest(true); };
+  return (mapBtn = b);
+} });
+new L.Control.Conq({ position: 'topright' }).addTo(map);
 let calcStop = false;
 async function calcAll() {
   const list = idfFeats.filter(f => (touched[f.code] || 0) >= 4 && pcts[f.code] === undefined);
@@ -591,7 +658,7 @@ $('#wipeNo').onclick = () => ($('#wipeConfirm').hidden = true);
 $('#wipeYes').onclick = async () => {
   if (dbx.isConnected()) await dbx.disconnect();
   await wipeAll();
-  fog = null; fogMeta = null; current = null; routes = []; pcts = {}; touched = null; idfFeats = null; conquestOn = false; conquestLayer.remove(); $('#conquestHide')?.click();
+  fog = null; fogMeta = null; current = null; routes = []; pcts = {}; touched = null; idfFeats = null; hideConquest();
   [streetsLayer, outlineLayer, routeLayer, markerLayer, hlLayer].forEach(l => l.clearLayers());
   fogLayer.redraw(); $('#communeOut').innerHTML = ''; $('#routeOut').innerHTML = ''; $('#legend').hidden = true;
   $('#wipeConfirm').hidden = true; $('#dbxKey').value = ''; dbxUi(); fogStatus(null);
