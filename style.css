@@ -135,3 +135,5 @@ code { font: 12px var(--mono); background: var(--panel); padding: 1px 5px; borde
 .mapbtn.on { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
 #deptList .s .bar { display: block; height: 5px; }
 .zlo .dlab.pc { display: none; }
+/* calm the OSM base map so traces and streets stand out */
+.basemap { filter: grayscale(.75) contrast(.85) brightness(1.06); }
