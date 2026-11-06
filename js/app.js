@@ -15,7 +15,6 @@ let fog = null;
 let radius = +(ls.get('tol') || 2);
 
 // ---------------- map ----------------
-const light = matchMedia('(prefers-color-scheme: light)');
 const map = L.map('map', { zoomControl: false, preferCanvas: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 0.5 }).setView([48.8566, 2.3522], 12);
 L.control.zoom({ position: 'topright' }).addTo(map);
 let base;
@@ -31,7 +30,7 @@ function setBase() {
   base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: 19, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution, className: 'basemap' }).addTo(map);
   base.bringToBack();
 }
-setBase(); light.addEventListener?.('change', () => { setBase(); redrawAll(); });
+setBase();
 
 // Explored pixels layer (drawn from the decoded bitmaps, in this browser)
 const FogLayer = L.GridLayer.extend({

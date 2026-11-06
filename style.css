@@ -1,18 +1,13 @@
-/* Map-first app. Dark by default (night map), light variant follows the system.
+/* Map-first app, light theme only.
    Amber = the fog still to clear (unexplored streets); cyan = ground you've already uncovered. */
 :root {
-  --bg: #0d1117; --panel: #151b24; --panel-2: #1c2430; --line: #2a3442;
-  --fg: #e6edf5; --muted: #8b98a9;
-  --new: #ffb02e; --done: #57c7e8; --accent: #ffb02e; --accent-fg: #1b1200;
-  --danger: #ff6b6b; --shadow: 0 8px 30px rgba(0,0,0,.45);
+  --bg: #eef1f4; --panel: #ffffff; --panel-2: #f3f5f8; --line: #dde3ea;
+  --fg: #17202b; --muted: #5c6878;
+  --new: #e8890c; --done: #1786b0; --accent: #e8890c; --accent-fg: #fff;
+  --danger: #c93636; --shadow: 0 8px 30px rgba(20,30,40,.18);
   --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  color-scheme: dark;
-}
-@media (prefers-color-scheme: light) {
-  :root { --bg: #eef1f4; --panel: #ffffff; --panel-2: #f3f5f8; --line: #dde3ea;
-    --fg: #17202b; --muted: #5c6878; --new: #e8890c; --done: #1786b0; --accent: #e8890c; --accent-fg: #fff;
-    --danger: #c93636; --shadow: 0 8px 30px rgba(20,30,40,.18); color-scheme: light; }
+  color-scheme: light;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -131,8 +126,7 @@ code { font: 12px var(--mono); background: var(--panel); padding: 1px 5px; borde
 .levels b { font: 700 22px/1 var(--font); font-variant-numeric: tabular-nums; }
 .levels span { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
 .levels i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
-:root { --lv0: #3a4352; --lv1: #5b4a2a; --lv2: #9a6a1e; --lv3: #e0a020; --lv4: #4fb3d9; --lv5: #9be7ff; }
-@media (prefers-color-scheme: light) { :root { --lv0: #d7dde5; --lv1: #f6e2b8; --lv2: #f0c060; --lv3: #e08a10; --lv4: #2a9fd0; --lv5: #0b5f85; } }
+:root { --lv0: #c9d1db; --lv1: #f6e2b8; --lv2: #f0c060; --lv3: #e08a10; --lv4: #2a9fd0; --lv5: #0b5f85; }
 
 .sq { display: inline-block; width: 11px; height: 11px; border-radius: 3px; }
 .legend { flex-wrap: wrap; max-width: calc(100% - 90px); }
@@ -141,6 +135,3 @@ code { font: 12px var(--mono); background: var(--panel); padding: 1px 5px; borde
 .mapbtn.on { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
 #deptList .s .bar { display: block; height: 5px; }
 .zlo .dlab.pc { display: none; }
-/* night map: invert the light OSM tiles (classic dark-mode trick), keep it soft */
-.basemap { filter: invert(1) hue-rotate(180deg) brightness(.82) contrast(.9) saturate(.6); }
-@media (prefers-color-scheme: light) { .basemap { filter: none; } }
