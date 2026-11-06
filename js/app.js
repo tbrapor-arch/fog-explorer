@@ -1,6 +1,6 @@
 import { FogMap, fogFromSnapshot, WORLD } from './fog.js';
 import { fetchWays, fetchStations, cellsFor, gunzipJSON, decodeTile, tilesFor, buildNetwork, summarize, inGeometry, geomBbox, distM } from './streets.js';
-import { Graph, routesAB, routesLoop, routeCommune, toGPX } from './route.js';
+import { Graph, routesAB, routesLoop, routeCommune, toGPX, toKML } from './route.js';
 import { idbGet, idbSet, wipeAll, ls } from './store.js';
 import * as dbx from './dropbox.js';
 import { largestNetworks } from './network.js';
@@ -803,10 +803,11 @@ $('#go').onclick = async () => {
         <div class="t"><span>${r.label}</span><span>+${km(r.fresh)} nouveaux</span></div>
         <div class="kv"><span>${km(r.len)} · ~${Math.round(r.len / 1000 / 4.5 * 60)} min</span><span>${pct(r.fresh, r.len)} % de rues nouvelles${mode === 'ab' && i ? ' · détour +' + pct(r.len - base, base) + ' %' : ''}</span></div>
         ${r.note ? `<div class="kv"><span>${esc(r.note)}</span></div>` : ''}
-        <div class="acts"><button class="btn small" data-gpx="${i}">GPX</button><a class="btn small ghost" data-gm="${i}" target="_blank" rel="noopener noreferrer">Google Maps</a></div>
-      </div>`).join('') + `<p class="muted small">GPX : à ouvrir dans OsmAnd, Organic Maps ou Komoot pour suivre exactement le tracé. Google Maps recalcule entre quelques points de passage, le tracé peut un peu différer.</p>`;
+        <div class="acts"><button class="btn small primary" data-kml="${i}">Ouvrir dans Maps (KML)</button><button class="btn small" data-gpx="${i}">GPX</button><a class="btn small ghost" data-gm="${i}" target="_blank" rel="noopener noreferrer">Itinéraire Google</a></div>
+      </div>`).join('') + `<p class="muted small">KML : le tracé exact en une ligne, à ouvrir dans Google Maps ou Google Earth. GPX : pour OsmAnd, Organic Maps ou Komoot. « Itinéraire Google » lance la navigation, mais Google recalcule entre 8 points de passage : le tracé peut différer.</p>`;
     $$('#routeOut .card').forEach(c => c.onclick = e => { if (!e.target.closest('.acts')) selectRoute(+c.dataset.i); });
     $$('[data-gpx]').forEach(b => b.onclick = () => saveGPX(routes[+b.dataset.gpx]));
+    $$('[data-kml]').forEach(b => b.onclick = () => saveKML(routes[+b.dataset.kml]));
     $$('[data-gm]').forEach(a => (a.href = gmapsUrl(routes[+a.dataset.gm])));
     selectRoute(routes.length > 1 ? 1 : 0);
   } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
@@ -841,11 +842,20 @@ function selectRoute(i) {
   fit(L.latLngBounds(routes.flatMap(x => x.coords.map(ll))));
   $$('#routeOut .card').forEach(c => c.classList.toggle('sel', +c.dataset.i === i));
 }
-function saveGPX(r) {
-  const blob = new Blob([toGPX(r.coords, 'Fog Explorer – ' + r.label)], { type: 'application/gpx+xml' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = `fog-explorer-${r.label.toLowerCase().replace(/\W+/g, '-')}.gpx`; a.click();
+// share sheet first (Android offers Google Maps / Earth directly), plain download otherwise
+async function handOff(text, type, filename) {
+  const blob = new Blob([text], { type });
+  try {
+    const file = new File([blob], filename, { type });
+    if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: filename }); return; }
+  } catch (e) { if (e.name === 'AbortError') return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+const fileName = (r, ext) => `fog-explorer-${r.label.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\W+/g, '-')}-${(r.len / 1000).toFixed(1).replace('.', ',')}km.${ext}`;
+function saveKML(r) { handOff(toKML(r.coords, `Fog Explorer · ${r.label} · ${km(r.len)}`), 'application/vnd.google-earth.kml+xml', fileName(r, 'kml')); }
+function saveGPX(r) {
+  handOff(toGPX(r.coords, 'Fog Explorer – ' + r.label), 'application/gpx+xml', fileName(r, 'gpx'));
 }
 function gmapsUrl(r) {
   const c = r.coords, f = p => `${p[1].toFixed(6)},${p[0].toFixed(6)}`, n = 8, wps = [];

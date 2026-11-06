@@ -289,3 +289,17 @@ export function routeCommune(g, start, { budget, inArea, ends }) {
   for (const si of d.segs) { if (!seen.has(si) && !segs[si].done && inArea(si)) freshIn += segs[si].len; seen.add(si); }
   return { ...d, freshIn, end: e };
 }
+
+// KML (Google Maps / Google Earth): the exact route as one line, plus start and finish pins.
+export function toKML(coords, name, isNew) {
+  const c = ps => ps.map(([lon, lat]) => `${lon.toFixed(6)},${lat.toFixed(6)},0`).join(' ');
+  const esc = t => String(t).replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
+  const a = coords[0], b = coords[coords.length - 1];
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>${esc(name)}</name>
+<Style id="r"><LineStyle><color>ffd47f2b</color><width>6</width></LineStyle></Style>
+<Placemark><name>${esc(name)}</name><styleUrl>#r</styleUrl><LineString><tessellate>1</tessellate><coordinates>${c(coords)}</coordinates></LineString></Placemark>
+<Placemark><name>Départ</name><Point><coordinates>${c([a])}</coordinates></Point></Placemark>
+<Placemark><name>Arrivée</name><Point><coordinates>${c([b])}</coordinates></Point></Placemark>
+</Document></kml>`;
+}
