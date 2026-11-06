@@ -113,7 +113,7 @@ async function getWays(bbox, key) {
   if (stored && Date.now() - stored.t < 14 * 864e5) { waysCache.set(key, stored.ways); return stored.ways; }
   const ways = await fetchWays(bbox);
   // keep only what we need to reduce storage
-  const slim = ways.map(w => ({ id: w.id, nodes: w.nodes, geometry: w.geometry.map(g => g && { lon: g.lon, lat: g.lat }), tags: { highway: w.tags?.highway, name: w.tags?.name } }));
+  const slim = ways.map(w => ({ id: w.id, nodes: w.nodes, geometry: w.geometry.map(g => g && { lon: g.lon, lat: g.lat }), tags: { highway: w.tags?.highway, name: w.tags?.name, width: w.tags?.width } }));
   waysCache.set(key, slim); idbSet('ways:' + key, { t: Date.now(), ways: slim });
   return slim;
 }
@@ -168,14 +168,15 @@ async function analyze(area, fitView = true) {
 
 function renderStats(area, st) {
   const r = st.roads, p = st.paths;
-  const todo = [...st.byName.values()].map(e => ({ ...e, left: e.total - e.done })).filter(e => e.left > 30).sort((a, b) => b.left - a.left);
+  const todo = [...st.byName.values()].map(e => ({ ...e, left: e.total - e.done })).filter(e => e.left > 30 && e.done < 0.9 * e.total).sort((a, b) => b.left - a.left);
   const virgin = todo.filter(e => e.done < 1).length;
   $('#communeOut').innerHTML = `
     <div class="stat">
       <div class="big">${pct(r.done, r.total)} %<small>des rues de ${esc(area.name)}</small></div>
       <div class="bar"><i style="width:${pct(r.done, r.total)}%"></i></div>
       <div class="kv"><span>${km(r.done)} faits sur ${km(r.total)}</span><span>reste ${km(r.total - r.done)}</span></div>
-      <div class="kv"><span>Chemins et allées : ${pct(p.done, p.total)} %</span><span>${virgin} rues jamais foulées</span></div>
+      <div class="kv"><span><b>${st.finished}</b> rues finies sur ${st.streets}</span><span>${virgin} jamais foulées</span></div>
+      <div class="kv"><span>Chemins et allées : ${pct(p.done, p.total)} %</span><span>niveau : <b>${LEVELS[levelFromPct(r.total ? r.done / r.total : 0, true)]}</b></span></div>
     </div>
     ${area.geom ? `<button id="toCom" class="btn primary">Itinéraire pour cocher ${esc(area.name)}</button>` : ''}
     <h3>Rues à finir</h3>
@@ -194,8 +195,14 @@ function renderStats(area, st) {
 
 
 // ---------------- conquest: every commune of Île-de-France by level ----------------
-// level 0 vierge · 1 traversée (touched, or < 5 % of streets) · 2 visitée (5–50 %) · 3 conquise (≥ 50 %)
-const LEVELS = ['Vierges', 'Traversées', 'Visitées', 'Conquises'];
+// Levels by % of street length walked. "Finie" stops at 90 %: a few streets are always
+// unreachable or badly mapped.
+const LEVELS = ['Vierge', 'Traversée', 'Visitée', 'Explorée', 'Conquise', 'Finie'];
+const LEVEL_MIN = [0, 0, 0.10, 0.25, 0.50, 0.90];
+function levelFromPct(p, touchedOrPos) {
+  for (let i = LEVELS.length - 1; i >= 2; i--) if (p >= LEVEL_MIN[i]) return i;
+  return touchedOrPos || p > 0 ? 1 : 0;
+}
 let pcts = {}; idbGet('pcts').then(v => { if (v) pcts = v; });
 function savePct(code, p) { pcts[code] = { p, t: Date.now() }; idbSet('pcts', pcts); if (conquestOn) drawConquest(); }
 let idfFeats = null, touched = null, conquestOn = false;
@@ -244,24 +251,24 @@ function computeTouched() {
 }
 const levelOf = code => {
   const p = pcts[code]?.p;
-  if (p !== undefined) return p >= 0.5 ? 3 : p >= 0.05 ? 2 : (touched[code] || p > 0) ? 1 : 0;
+  if (p !== undefined) return levelFromPct(p, (touched[code] || 0) >= 4);
   return (touched[code] || 0) >= 4 ? 1 : 0;
 };
 function drawConquest() {
   conquestLayer.clearLayers();
-  const cols = [css('--lv0'), css('--lv1'), css('--lv2'), css('--lv3')], n = [0, 0, 0, 0];
+  const cols = LEVELS.map((_, i) => css('--lv' + i)), n = LEVELS.map(() => 0);
   for (const f of idfFeats) {
     const lv = levelOf(f.code); n[lv]++;
     const p = pcts[f.code]?.p;
     L.geoJSON(f.geom, { pane: 'conq', renderer: conqRenderer, style: { color: css('--line'), weight: .6, fillColor: cols[lv], fillOpacity: lv ? .45 : .12 } })
-      .bindTooltip(`${esc(f.nom)} · ${p !== undefined ? Math.round(p * 100) + ' % des rues' : LEVELS[lv].toLowerCase().replace(/s$/, 'e')}`, { sticky: true })
+      .bindTooltip(`${esc(f.nom)} · ${p !== undefined ? Math.round(p * 100) + ' % des rues' : LEVELS[lv].toLowerCase()}`, { sticky: true })
       .on('click', () => { if (!conquestOn) return; $('#communeQ').value = f.nom; openCommune(f.code); })
       .addTo(conquestLayer);
   }
   const unknown = idfFeats.filter(f => (touched[f.code] || 0) >= 4 && pcts[f.code] === undefined).length;
   $('#conquest').innerHTML = `
-    <div class="levels">${LEVELS.map((l, i) => `<div><b>${n[i]}</b><span><i style="background:${cols[i]}"></i>${l}</span></div>`).join('')}</div>
-    <p class="muted small">Sur ${idfFeats.length} communes et arrondissements. Conquise = au moins 50 % des rues faites, visitée = 5 à 50 %, traversée = tu y es passé (train compris).</p>
+    <div class="levels">${LEVELS.map((l, i) => `<div><b>${n[i]}</b><span><i style="background:${cols[i]}"></i>${l}s</span></div>`).join('')}</div>
+    <p class="muted small">Sur ${idfFeats.length} communes et arrondissements, en % des km de rues faites : traversée &lt; 10 %, visitée 10–25 %, explorée 25–50 %, conquise 50–90 %, finie ≥ 90 %.</p>
     <div class="row wrap">
       <button id="conquestHide" class="btn small">Masquer la carte</button>
       ${unknown ? `<button id="conquestCalc" class="btn small">Calculer le % de ${unknown} communes traversées</button>` : ''}

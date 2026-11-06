@@ -5,7 +5,16 @@ Compagnon web pour [Fog of World](https://fogofworld.app) : il lit tes traces et
 ## Fonctions
 
 - **Commune** : rues faites ou à découvrir, pourcentage, liste des rues à finir.
-- **Ma conquête de l'Île-de-France** : chaque commune est classée vierge, traversée, visitée (5 à 50 % des rues) ou conquise (au moins 50 %).
+- **Ma conquête de l'Île-de-France** : chaque commune est classée selon le % de km de rues faites : vierge, traversée (moins de 10 %), visitée (10 à 25 %), explorée (25 à 50 %), conquise (50 à 90 %), finie (au moins 90 %).
+
+## Méthode de calcul
+
+Fog of World mesure une surface dévoilée. Cette surface inclut les immeubles et les zones interdites, donc une ville parcourue à fond reste à quelques %. Ici, on compte plutôt les **km de rues accessibles à pied** (OpenStreetMap). Les autoroutes, les voies rapides, l'accès privé, les parkings et les voies de service sans nom sont exclus. Les trottoirs dessinés à part ne sont pas comptés, pour ne pas compter deux fois la même rue.
+
+- Chaque tronçon est testé tous les 8 m. Un point compte s'il est près d'une trace : environ 12 m pour une rue, 18 à 25 m pour un boulevard, selon sa largeur.
+- Si au moins 60 % des points d'un tronçon comptent, tout le tronçon est fait. Entre 25 et 60 %, il est compté au prorata. En dessous de 25 %, rien n'est compté : c'est souvent une simple traversée au carrefour.
+- Une rue (toutes les voies du même nom) est **finie** quand au moins 90 % de sa longueur est faite.
+- Les chemins des parcs, les sentiers et les escaliers ont leur propre %.
 - **Itinéraires** :
   - de A à B (direct, équilibré, aventure) ;
   - boucle autour d'un point ;

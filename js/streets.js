@@ -65,12 +65,31 @@ export function distM(lon1, lat1, lon2, lat2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+// Extra GPS tolerance for wide roads: on a boulevard you walk on the sidewalk, 15–25 m from the
+// line OpenStreetMap draws in the middle. One fog pixel ≈ 6 m in Île-de-France.
+const PX_M = 6.3;
+function radiusFor(hw, width, base) {
+  const w = parseFloat(width);
+  if (w > 0) return Math.max(base, Math.ceil((w / 2 + 6) / PX_M));
+  if (/^(primary|secondary)(_link)?$/.test(hw)) return base + 2;
+  if (/^tertiary/.test(hw) || hw === 'pedestrian') return base + 1;
+  return base;
+}
+
+// How much of a segment counts as explored, in metres:
+//  - ≥ 60 % of its sample points near a trace: the whole segment (it is "fait");
+//  - 25–60 %: proportional credit (walked part of it);
+//  - < 25 %: nothing (that's usually just crossing it at a junction).
+export const credit = s => s.done ? s.len : s.frac >= 0.25 ? s.len * s.frac : 0;
+
 // Splits ways into segments (node to node) and measures how much of each one is explored.
 // Returns { nodes: Map(id -> [lon,lat]), segs: [{a,b,len,frac,done,w}], ways: [{name,hw,path}] }
 export function buildNetwork(ways, fog, { radius = 2, step = 8, threshold = 0.6 } = {}) {
   const nodes = new Map(), segs = [], wl = [];
   for (const w of ways) {
     const hw = w.tags?.highway || '';
+    if (hw === 'service' && !w.tags?.name) continue; // unnamed service roads: mostly private courtyards and car parks
+    const r = radiusFor(hw, w.tags?.width, radius);
     const wi = wl.length;
     wl.push({ id: w.id, name: w.tags?.name || '', hw, path: PATH_TYPES.has(hw) });
     for (let i = 0; i < w.nodes.length; i++) {
@@ -86,7 +105,7 @@ export function buildNetwork(ways, fog, { radius = 2, step = 8, threshold = 0.6 
       let hit = 0;
       for (let j = 0; j <= k; j++) {
         const t = j / k;
-        if (fog && fog.near(p.lon + (q.lon - p.lon) * t, p.lat + (q.lat - p.lat) * t, radius)) hit++;
+        if (fog && fog.near(p.lon + (q.lon - p.lon) * t, p.lat + (q.lat - p.lat) * t, r)) hit++;
       }
       const frac = hit / (k + 1);
       segs.push({ a: w.nodes[i - 1], b: w.nodes[i], len, frac, done: frac >= threshold, w: wi });
@@ -118,19 +137,21 @@ export function geomBbox(geom) {
   return [s, w, n, e];
 }
 
-// Stats for a set of segments
+// Stats for a set of segments. Street = all OSM ways sharing a name in the area.
+// A street is "finie" when ≥ 90 % of its length is credited.
 export function summarize(net, segFilter = () => true) {
-  const st = { roads: { total: 0, done: 0 }, paths: { total: 0, done: 0 }, byName: new Map() };
+  const st = { roads: { total: 0, done: 0 }, paths: { total: 0, done: 0 }, byName: new Map(), streets: 0, finished: 0 };
   for (const s of net.segs) {
     if (!segFilter(s)) continue;
-    const w = net.ways[s.w];
+    const w = net.ways[s.w], c = credit(s);
     const bucket = w.path ? st.paths : st.roads;
-    bucket.total += s.len; if (s.done) bucket.done += s.len;
+    bucket.total += s.len; bucket.done += c;
     if (!w.path && w.name) {
       let e = st.byName.get(w.name);
       if (!e) st.byName.set(w.name, e = { name: w.name, total: 0, done: 0, segs: [] });
-      e.total += s.len; if (s.done) e.done += s.len; e.segs.push(s);
+      e.total += s.len; e.done += c; e.segs.push(s);
     }
   }
+  for (const e of st.byName.values()) { if (e.total < 20) continue; st.streets++; if (e.done >= 0.9 * e.total) st.finished++; }
   return st;
 }
