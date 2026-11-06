@@ -20,17 +20,15 @@ const map = L.map('map', { zoomControl: false, preferCanvas: true, attributionCo
 L.control.zoom({ position: 'topright' }).addTo(map);
 let base;
 const BASES = {
-  carto: () => ({ url: `https://{s}.basemaps.cartocdn.com/${light.matches ? 'light_all' : 'dark_all'}/{z}/{x}/{y}{r}.png`, subdomains: 'abcd', maxNativeZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>' }),
-  osmfr: () => ({ url: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', subdomains: 'abc', maxNativeZoom: 19,
+  osmfr: () => ({ url: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', subdomains: 'abc',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · OSM France' }),
-  osm: () => ({ url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: '', maxNativeZoom: 19,
+  osm: () => ({ url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: '',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' }),
 };
 function setBase() {
   if (base) base.remove();
-  const b = (BASES[ls.get('base')] || BASES.carto)();
-  base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: b.maxNativeZoom, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution }).addTo(map);
+  const b = (BASES[ls.get('base')] || BASES.osmfr)();
+  base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: 19, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution, className: 'basemap' }).addTo(map);
   base.bringToBack();
 }
 setBase(); light.addEventListener?.('change', () => { setBase(); redrawAll(); });
@@ -655,7 +653,7 @@ async function syncDropbox() {
   } catch (e) { toast(e.message, true); fogStatus(fogMeta); dbxUi(); }
 }
 
-$('#baseSel').value = ls.get('base') || 'carto';
+$('#baseSel').value = BASES[ls.get('base')] ? ls.get('base') : 'osmfr';
 $('#baseSel').onchange = e => { ls.set('base', e.target.value); setBase(); };
 $('#tol').value = radius; $('#tolV').textContent = Math.round(radius * 6);
 $('#tol').oninput = e => { radius = +e.target.value; $('#tolV').textContent = Math.round(radius * 6); };
@@ -695,4 +693,4 @@ function redrawAll() { fogLayer.redraw(); if (current) analyze(current, false); 
   }
 })();
 
-if ('serviceWorker' in navigator) { /* no service worker on purpose: nothing cached outside this page's own storage */ }
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

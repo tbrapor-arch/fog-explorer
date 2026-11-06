@@ -5,3 +5,4 @@ Sync/
 data/
 *.png
 !vendor/images/*.png
+!icon-*.png
