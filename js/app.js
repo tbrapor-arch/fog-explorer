@@ -787,8 +787,9 @@ $('#go').onclick = async () => {
       routes = [];
       for (const [f, label] of [[0.6, 'Sortie courte'], [1, 'Sortie complète']]) {
         const r = routeCommune(g, a.node, { budget: comBudget * f, inArea: si => inA[si], ends });
-        if (r && !routes.some(o => Math.abs(o.len - r.len) < 100)) routes.push({ ...r, label, note: `+${km(r.freshIn)} dans ${current.name}${endNames.has(r.end) ? ' · arrivée gare ' + endNames.get(r.end) : ''}` });
+        if (r && r.freshIn >= 100 && !routes.some(o => Math.abs(o.len - r.len) < 100)) routes.push({ ...r, label, note: `+${km(r.freshIn)} dans ${current.name}${endNames.has(r.end) ? ' · arrivée gare ' + endNames.get(r.end) : ''}` });
       }
+      if (!routes.length) throw new Error(`Aucune rue nouvelle de ${current.name} n'est atteignable avec ${km(comBudget)} depuis ce départ. Augmente la longueur max ou pars d'une gare plus proche.`);
     } else {
       const b = g.nearest(...pts.to);
       if (b.dist > 300) throw new Error("Aucune rue piétonne près de l'arrivée.");

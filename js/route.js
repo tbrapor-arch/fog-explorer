@@ -30,6 +30,12 @@ class Heap {
 const BIG = /^(trunk|primary|secondary)(_link)?$/;
 const SMALL = /^(footway|path|steps|pedestrian|living_street|track|bridleway)$/;
 
+// Pedestrian crossings and sidewalks are not in the street data, so the paths of a square or a
+// park often touch the streets without being joined to them (e.g. the middle of place
+// Denfert-Rochereau). Such islands are joined to the nearest node of another piece of the
+// network if it is within LINK_M: that short link stands for the missing crossing.
+const LINK_M = 35;
+
 export class Graph {
   constructor(net, opts = {}) {
     this.net = net;
@@ -37,17 +43,81 @@ export class Graph {
     const ids = [];
     const id = n => { let i = this.idx.get(n); if (i === undefined) { i = ids.length; this.idx.set(n, i); ids.push(n); this.coords.push(net.nodes.get(n)); } return i; };
     this.adj = [];
+    // this.segs = the network's segments + the crossing links added below (same indices first)
+    this.segs = net.segs.slice();
     net.segs.forEach((s, si) => {
       const a = id(s.a), b = id(s.b);
       (this.adj[a] ||= []).push(b, si); (this.adj[b] ||= []).push(a, si);
     });
+    this.joinIslands();
     this.setCharm(opts.charm);
+  }
+  // union-find over graph nodes
+  components() {
+    const n = this.coords.length, up = new Int32Array(n);
+    for (let i = 0; i < n; i++) up[i] = i;
+    const find = x => { while (up[x] !== x) { up[x] = up[up[x]]; x = up[x]; } return x; };
+    for (let u = 0; u < n; u++) { const a = this.adj[u]; if (a) for (let j = 0; j < a.length; j += 2) { const x = find(u), y = find(a[j]); if (x !== y) up[x] = y; } }
+    return { find, up };
+  }
+  joinIslands() {
+    const n = this.coords.length;
+    if (!n) return;
+    const { find, up } = this.components();
+    const size = new Map();
+    for (let i = 0; i < n; i++) if (this.adj[i]) { const r = find(i); size.set(r, (size.get(r) || 0) + 1); }
+    let mainRoot = -1, mainSize = 0;
+    for (const [r, s] of size) if (s > mainSize) { mainSize = s; mainRoot = r; }
+    // spatial grid (~LINK_M cells) of all nodes
+    const lat0 = this.coords[0][1], cy = LINK_M / 111320, cx = LINK_M / (111320 * Math.cos(lat0 * Math.PI / 180));
+    const grid = new Map(), key = (x, y) => x + ',' + y;
+    for (let i = 0; i < n; i++) {
+      if (!this.adj[i]) continue;
+      const [lon, lat] = this.coords[i], k = key(Math.floor(lon / cx), Math.floor(lat / cy));
+      let c = grid.get(k); if (!c) grid.set(k, c = []); c.push(i);
+    }
+    // for every node outside the main piece: closest node of another piece within LINK_M
+    const best = new Map(), bestMain = new Map(); // island root -> [dist, u, v] (any piece / main piece)
+    for (let u = 0; u < n; u++) {
+      if (!this.adj[u]) continue;
+      const ru = find(u); if (ru === mainRoot) continue;
+      const [lon, lat] = this.coords[u], gx = Math.floor(lon / cx), gy = Math.floor(lat / cy);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        const c = grid.get(key(gx + dx, gy + dy)); if (!c) continue;
+        for (const v of c) {
+          if (find(v) === ru) continue;
+          const d = distM(lon, lat, this.coords[v][0], this.coords[v][1]);
+          if (d > LINK_M) continue;
+          const b = best.get(ru);
+          if (!b || d < b[0]) best.set(ru, [d, u, v]);
+          if (find(v) === mainRoot) { const m = bestMain.get(ru); if (!m || d < m[0]) bestMain.set(ru, [d, u, v]); }
+        }
+      }
+    }
+    // Kruskal: shortest links first, one per merge
+    const cand = [...best.values(), ...bestMain.values()].sort((a, b) => a[0] - b[0]);
+    const find2 = x => { while (up[x] !== x) { up[x] = up[up[x]]; x = up[x]; } return x; };
+    for (const [d, u, v] of cand) {
+      const x = find2(u), y = find2(v); if (x === y) continue;
+      up[x] = y;
+      const si = this.segs.length;
+      // done: a crossing is never "new street" and doesn't count in any commune
+      this.segs.push({ a: null, b: null, len: Math.max(d, 1), frac: 1, done: true, w: -1, link: true });
+      this.adj[u].push(v, si); this.adj[v].push(u, si);
+    }
+    // pieces still apart after linking: snapping prefers the biggest one
+    const { find: f3 } = this.components(), cnt = new Map();
+    for (let i = 0; i < n; i++) if (this.adj[i]) { const r = f3(i); cnt.set(r, (cnt.get(r) || 0) + 1); }
+    let r0 = -1, m0 = 0; for (const [r, s] of cnt) if (s > m0) { m0 = s; r0 = r; }
+    this.main = new Uint8Array(n);
+    for (let i = 0; i < n; i++) if (this.adj[i] && f3(i) === r0) this.main[i] = 1;
   }
   // "charme": small streets, passages and steps feel cheaper, big roads feel longer
   setCharm(on) {
-    this.mult = new Float32Array(this.net.segs.length).fill(1);
+    this.mult = new Float32Array(this.segs.length).fill(1);
     if (!on) return;
-    this.net.segs.forEach((s, i) => {
+    this.segs.forEach((s, i) => {
+      if (s.w < 0) return;
       const hw = this.net.ways[s.w].hw;
       this.mult[i] = BIG.test(hw) ? 1.4 : hw === 'tertiary' || hw === 'service' ? 1.1 : SMALL.test(hw) ? 0.85 : 1;
     });
@@ -55,7 +125,7 @@ export class Graph {
   // Dijkstra; stops early at `to` if given. used: Set of segs already walked (count as explored)
   run(from, to, alpha, penalty, used) {
     const n = this.coords.length, dist = new Float64Array(n).fill(Infinity), prev = new Int32Array(n).fill(-1), prevSeg = new Int32Array(n).fill(-1);
-    const segs = this.net.segs, mult = this.mult, h = new Heap();
+    const segs = this.segs, mult = this.mult, h = new Heap();
     dist[from] = 0; h.push(0, from);
     while (h.size) {
       const u = h.pop();
@@ -79,10 +149,11 @@ export class Graph {
     for (let v = to; v !== from; v = t.prev[v]) { segs.push(t.prevSeg[v]); path.push(t.prev[v]); }
     return { path: path.reverse(), segs: segs.reverse() };
   }
+  // closest node of the main network (never a cut-off island)
   nearest(lon, lat) {
     let best = -1, bd = Infinity;
     for (let i = 0; i < this.coords.length; i++) {
-      if (!this.adj[i]) continue;
+      if (!this.main[i]) continue;
       const [x, y] = this.coords[i];
       const d = distM(lon, lat, x, y);
       if (d < bd) { bd = d; best = i; }
@@ -98,7 +169,7 @@ export class Graph {
     parts.forEach((p, i) => nodes.push(...(i ? p.path.slice(1) : p.path)));
     const seen = new Set(), isNew = []; let len = 0, fresh = 0;
     for (const si of segs) {
-      const s = this.net.segs[si]; len += s.len;
+      const s = this.segs[si]; len += s.len;
       const nw = !s.done && !seen.has(si);
       if (nw) fresh += s.len;
       isNew.push(nw); seen.add(si);
@@ -164,13 +235,19 @@ export function toGPX(coords, name) {
 // collects the most new metres inside the commune per metre walked, while keeping enough budget to
 // reach a finish (the start for a loop, or the nearest station). Repeat, then walk to the finish.
 export function routeCommune(g, start, { budget, inArea, ends }) {
-  const segs = g.net.segs, used = new Set(), parts = [], n = g.coords.length;
-  const endCoords = ends.map(e => g.coords[e]);
-  const toEnd = v => {
-    const [x, y] = g.coords[v]; let m = Infinity;
-    for (const [a, b] of endCoords) { const d = distM(x, y, a, b); if (d < m) m = d; }
-    return m * 1.3;
-  };
+  const segs = g.segs, used = new Set(), parts = [], n = g.coords.length;
+  // real walking distance from every node to the closest finish (multi-source Dijkstra),
+  // +10 % for the last leg, which takes a slightly longer way to avoid repeating streets
+  const dEnd = new Float64Array(n).fill(Infinity), h = new Heap();
+  for (const e of ends) { dEnd[e] = 0; h.push(0, e); }
+  while (h.size) {
+    const u = h.pop(), a = g.adj[u]; if (!a) continue;
+    for (let j = 0; j < a.length; j += 2) {
+      const v = a[j], nd = dEnd[u] + segs[a[j + 1]].len;
+      if (nd < dEnd[v] - 1e-9) { dEnd[v] = nd; h.push(nd, v); }
+    }
+  }
+  const toEnd = v => dEnd[v] * 1.1;
   const real = new Float64Array(n), gain = new Float64Array(n);
   let cur = start, walked = 0;
   for (let iter = 0; iter < 80; iter++) {
@@ -193,12 +270,19 @@ export function routeCommune(g, start, { budget, inArea, ends }) {
     const p = g.pathTo(t, cur, best);
     parts.push(p); p.segs.forEach(s => used.add(s)); walked += real[best]; cur = best;
   }
-  const pen = new Map([...used].map(s => [s, 2]));
-  const t = g.run(cur, -1, 0.6, pen, used);
-  let e = -1, ed = Infinity;
-  for (const x of ends) if (t.dist[x] < ed) { ed = t.dist[x]; e = x; }
-  if (e < 0) return null;
-  if (e !== cur) parts.push(g.pathTo(t, cur, e));
+  // last leg: avoid repeating streets if it still fits the budget, else the shortest way
+  const realLen = p => p.segs.reduce((m, si) => m + segs[si].len, 0);
+  const lastLeg = (alpha, pen) => {
+    const t = g.run(cur, -1, alpha, pen, used);
+    let e = -1, ed = Infinity;
+    for (const x of ends) if (t.dist[x] < ed) { ed = t.dist[x]; e = x; }
+    return e < 0 ? null : { e, p: e === cur ? null : g.pathTo(t, cur, e) };
+  };
+  let last = lastLeg(0.6, new Map([...used].map(s => [s, 2])));
+  if (!last) return null;
+  if (last.p && walked + realLen(last.p) > budget) last = lastLeg(1, null) || last;
+  const e = last.e;
+  if (last.p) parts.push(last.p);
   if (!parts.length) return null;
   const d = g.describe(parts);
   const seen = new Set(); let freshIn = 0;
