@@ -96,13 +96,14 @@ export class Graph {
   describe(parts) {
     const segs = [].concat(...parts.map(p => p.segs)), nodes = [];
     parts.forEach((p, i) => nodes.push(...(i ? p.path.slice(1) : p.path)));
-    const seen = new Set(); let len = 0, fresh = 0;
+    const seen = new Set(), isNew = []; let len = 0, fresh = 0;
     for (const si of segs) {
       const s = this.net.segs[si]; len += s.len;
-      if (!s.done && !seen.has(si)) fresh += s.len;
-      seen.add(si);
+      const nw = !s.done && !seen.has(si);
+      if (nw) fresh += s.len;
+      isNew.push(nw); seen.add(si);
     }
-    return { len, fresh, segs, coords: nodes.map(i => this.coords[i]) };
+    return { len, fresh, segs, isNew, coords: nodes.map(i => this.coords[i]) };
   }
 }
 

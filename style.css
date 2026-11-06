@@ -137,3 +137,5 @@ code { font: 12px var(--mono); background: var(--panel); padding: 1px 5px; borde
 .zlo .dlab.pc { display: none; }
 /* calm the OSM base map so traces and streets stand out */
 .basemap { filter: grayscale(.75) contrast(.85) brightness(1.06); }
+.rlab { position: absolute; transform: translate(-50%, -130%); white-space: nowrap; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; font: 600 12px var(--font); box-shadow: var(--shadow); cursor: pointer; }
+.rlab.on { background: var(--fg); color: var(--panel); border-color: transparent; }

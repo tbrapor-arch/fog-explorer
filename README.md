@@ -28,7 +28,7 @@ Fog of World mesure une surface dévoilée. Cette surface inclut les immeubles e
 - Tes traces sont décodées et analysées **dans ton navigateur**. Elles restent dans le stockage local de l'appareil (IndexedDB) et ne sont envoyées à aucun serveur.
 - Services tiers appelés, sans tes traces :
   - OpenStreetMap / Overpass : la zone affichée, pour récupérer les rues ;
-  - OpenStreetMap France : le fond de carte ;
+  - Esri (gris clair) ou OpenStreetMap France : le fond de carte ;
   - geo.api.gouv.fr : les limites des communes ;
   - Géoplateforme IGN : la recherche d'adresse.
 - La synchro Dropbox est en lecture seule (OAuth PKCE, sans serveur ni secret). Le jeton reste dans ton navigateur.

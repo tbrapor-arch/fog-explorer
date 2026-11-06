@@ -19,16 +19,24 @@ const map = L.map('map', { zoomControl: false, preferCanvas: true, attributionCo
 L.control.zoom({ position: 'topright' }).addTo(map);
 let base;
 const BASES = {
+  epure: () => ({ url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', subdomains: '', native: 16,
+    labels: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', plain: true,
+    attribution: 'Fond &copy; Esri, HERE, Garmin, &copy; contributeurs <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' }),
   osmfr: () => ({ url: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', subdomains: 'abc',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · OSM France' }),
   osm: () => ({ url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: '',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' }),
 };
+let baseLabels;
 function setBase() {
-  if (base) base.remove();
-  const b = (BASES[ls.get('base')] || BASES.osmfr)();
-  base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: 19, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution, className: 'basemap' }).addTo(map);
+  if (base) base.remove(); if (baseLabels) baseLabels.remove();
+  const b = (BASES[ls.get('base')] || BASES.epure)();
+  base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: b.native || 19, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution, className: b.plain ? '' : 'basemap' }).addTo(map);
   base.bringToBack();
+  if (b.labels) {
+    if (!map.getPane('labels')) { map.createPane('labels').style.zIndex = 450; map.getPane('labels').style.pointerEvents = 'none'; }
+    baseLabels = L.tileLayer(b.labels, { pane: 'labels', maxZoom: 19, maxNativeZoom: b.native || 19, referrerPolicy: 'strict-origin' }).addTo(map);
+  }
 }
 setBase();
 
@@ -149,7 +157,7 @@ function drawStreets(net, filter) {
     state = s.done; lastB = s.b; lastW = s.w;
   }
   flush();
-  $('#legend').hidden = false;
+  $('#legend').innerHTML = legendStreets; $('#legend').hidden = false;
 }
 
 async function analyze(area, fitView = true) {
@@ -583,7 +591,7 @@ $('#go').onclick = async () => {
       routes = routesAB(g, a.node, b.node) || [];
     }
     if (!routes.length) throw new Error('Pas d\'itinéraire trouvé. Essaie une autre distance ou un autre départ.');
-    drawStreets(net); outlineLayer.clearLayers(); hlLayer.clearLayers();
+    streetsLayer.clearLayers(); $('#legend').hidden = true; outlineLayer.clearLayers(); hlLayer.clearLayers();
     const base = routes[0].len;
     out.innerHTML = routes.map((r, i) => `
       <div class="card" data-i="${i}">
@@ -599,14 +607,34 @@ $('#go').onclick = async () => {
   } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   $('#go').disabled = false;
 };
+// All variants on the map. The selected one is coloured piece by piece:
+// orange = streets you've never walked, blue = already done. Others: thin, tap their label to pick.
 function selectRoute(i) {
   routeLayer.clearLayers();
+  const ll = c => [c[1], c[0]];
   routes.forEach((r, j) => {
     if (j === i) return;
-    L.polyline(r.coords.map(([x, y]) => [y, x]), { color: css('--fg'), weight: 3, opacity: .25, interactive: false }).addTo(routeLayer);
+    L.polyline(r.coords.map(ll), { color: '#fff', weight: 6, opacity: .8, interactive: false }).addTo(routeLayer);
+    L.polyline(r.coords.map(ll), { color: css('--muted'), weight: 3.5, opacity: .9, dashArray: '2 7', lineCap: 'round', interactive: false }).addTo(routeLayer);
   });
-  const sel = L.polyline(routes[i].coords.map(([x, y]) => [y, x]), { color: css('--fg'), weight: 5, opacity: .9, interactive: false }).addTo(routeLayer);
-  fit(sel.getBounds());
+  const r = routes[i], cNew = css('--new'), cDone = css('--done');
+  const casing = L.polyline(r.coords.map(ll), { color: '#fff', weight: 10, opacity: .95, interactive: false }).addTo(routeLayer);
+  let run = [ll(r.coords[0])], state = r.isNew[0];
+  const flush = () => run.length > 1 && L.polyline(run, { color: state ? cNew : cDone, weight: 6, opacity: 1, lineCap: 'round', interactive: false }).addTo(routeLayer);
+  for (let k = 0; k < r.isNew.length; k++) {
+    if (r.isNew[k] !== state) { flush(); run = [run[run.length - 1]]; state = r.isNew[k]; }
+    run.push(ll(r.coords[k + 1]));
+  }
+  flush();
+  // labels to switch variant from the map
+  routes.forEach((x, j) => {
+    const at = x.coords[Math.floor(x.coords.length * (0.35 + 0.15 * j))] || x.coords[0];
+    L.marker(ll(at), { icon: L.divIcon({ className: '', iconSize: [0, 0], html: `<span class="rlab${j === i ? ' on' : ''}">${esc(x.label)} · ${km(x.len)}</span>` }) })
+      .on('click', () => selectRoute(j)).addTo(routeLayer);
+  });
+  $('#legend').innerHTML = `<span><i class="sw new" style="border-top-width:5px"></i>nouveau</span><span><i class="sw done" style="border-top-width:5px"></i>déjà fait</span><span><i class="sw" style="border-color:${css('--muted')};border-top-style:dotted"></i>autres variantes</span>`;
+  $('#legend').hidden = false;
+  fit(L.latLngBounds(routes.flatMap(x => x.coords.map(ll))));
   $$('#routeOut .card').forEach(c => c.classList.toggle('sel', +c.dataset.i === i));
 }
 function saveGPX(r) {
@@ -664,7 +692,7 @@ async function syncDropbox() {
 
 $('#fogSel').value = fogStyle;
 $('#fogSel').onchange = e => { fogStyle = e.target.value; ls.set('fogStyle', fogStyle); fogLayer.redraw(); };
-$('#baseSel').value = BASES[ls.get('base')] ? ls.get('base') : 'osmfr';
+$('#baseSel').value = BASES[ls.get('base')] ? ls.get('base') : 'epure';
 $('#baseSel').onchange = e => { ls.set('base', e.target.value); setBase(); };
 $('#tol').value = radius; $('#tolV').textContent = Math.round(radius * 6);
 $('#tol').oninput = e => { radius = +e.target.value; $('#tolV').textContent = Math.round(radius * 6); };

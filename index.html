@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org https://*.tile.openstreetmap.fr; connect-src 'self' https://overpass-api.de https://overpass.private.coffee https://maps.mail.ru https://geo.api.gouv.fr https://data.geopf.fr https://api-adresse.data.gouv.fr https://api.dropboxapi.com https://content.dropboxapi.com; worker-src 'self' blob:; base-uri 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://server.arcgisonline.com https://tile.openstreetmap.org https://*.tile.openstreetmap.fr; connect-src 'self' https://overpass-api.de https://overpass.private.coffee https://maps.mail.ru https://geo.api.gouv.fr https://data.geopf.fr https://api-adresse.data.gouv.fr https://api.dropboxapi.com https://content.dropboxapi.com; worker-src 'self' blob:; base-uri 'none'; object-src 'none'">
 <meta name="referrer" content="strict-origin">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#ffffff">
@@ -128,14 +128,14 @@
     <div class="field"><label for="fogSel">Affichage de mes traces</label>
       <select id="fogSel"><option value="brume">Brouillard, comme Fog of World</option><option value="traits">Traits de couleur</option></select></div>
     <div class="field"><label for="baseSel">Fond de carte</label>
-      <select id="baseSel"><option value="osmfr">OpenStreetMap France</option><option value="osm">OpenStreetMap</option></select></div>
+      <select id="baseSel"><option value="epure">Épuré (gris clair)</option><option value="osmfr">OpenStreetMap France</option><option value="osm">OpenStreetMap</option></select></div>
     <div class="field"><label for="tol">Tolérance GPS : <b id="tolV">12</b> m</label><input id="tol" type="range" min="1" max="4" step="1" value="2"></div>
     <p class="muted small">Une rue compte comme faite si au moins 60 % de sa longueur est à moins de cette distance d'une de tes traces.</p>
 
     <h3>Confidentialité</h3>
     <ul class="privacy">
       <li>Tes traces sont lues et analysées <b>uniquement sur cet appareil</b>. Elles ne sont envoyées nulle part et ne sont pas dans le code du site.</li>
-      <li>Les services de carte (OpenStreetMap, Overpass, geo.api.gouv.fr, Géoplateforme IGN) reçoivent seulement la zone affichée ou l'adresse tapée, comme n'importe quelle appli de carte. Ils voient aussi l'adresse du site (tbrapor-arch.github.io), jamais la page ni tes données.</li>
+      <li>Les services de carte (OpenStreetMap, Overpass, Esri, geo.api.gouv.fr, Géoplateforme IGN) reçoivent seulement la zone affichée ou l'adresse tapée, comme n'importe quelle appli de carte. Ils voient aussi l'adresse du site (tbrapor-arch.github.io), jamais la page ni tes données.</li>
       <li>Dropbox : accès en lecture seule, jeton gardé dans ce navigateur.</li>
       <li>Aucune statistique, aucun cookie, aucun traceur.</li>
     </ul>
