@@ -55,6 +55,8 @@ export function cellsFor([s, w, n, e]) {
 
 // ---- street data published with the app (built monthly by tools/build_streets.py) ----
 export async function gunzipJSON(bytes) {
+  // some servers already decompress .gz files on the way (Content-Encoding): then it's plain JSON
+  if (!(bytes[0] === 0x1f && bytes[1] === 0x8b)) return JSON.parse(new TextDecoder().decode(bytes));
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
   return JSON.parse(await new Response(stream).text());
 }

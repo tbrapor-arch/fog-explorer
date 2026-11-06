@@ -44,21 +44,21 @@ setBase();
 // Explored pixels drawn from the decoded bitmaps, in this browser.
 // "brume": a veil over everything, cleared where you've walked (like Fog of World);
 // "traits": your traces drawn as coloured lines.
-let fogStyle = ls.get('fogStyle') || 'brume';
+let fogStyle = ls.get('fogStyle2') || 'traits';
 const FogLayer = L.GridLayer.extend({
   createTile(c) {
     const cv = document.createElement('canvas'); cv.width = cv.height = 256;
     if (!fog) return cv;
     const ctx = cv.getContext('2d');
     const scale = Math.pow(2, c.z - 14);              // screen px per fog px
-    const dot = fogStyle === 'brume' ? Math.max(scale * 1.6, 3.5) : Math.max(scale, 2.2); // keep thin trails readable when zoomed out
+    const dot = fogStyle === 'brume' ? Math.max(scale * 1.6, 3.5) : Math.max(scale * 1.2, 2.6); // keep thin trails readable when zoomed out
     const off = (dot - scale) / 2;
     const fx0 = c.x * 256 / scale, fy0 = c.y * 256 / scale, fsz = 256 / scale, m = Math.ceil(dot / scale);
     const bx0 = Math.floor((fx0 - m) / 64), by0 = Math.floor((fy0 - m) / 64), bx1 = Math.floor((fx0 + fsz + m) / 64), by1 = Math.floor((fy0 + fsz + m) / 64);
     if (fogStyle === 'brume') {
-      ctx.fillStyle = 'rgba(52, 66, 86, 0.42)'; ctx.fillRect(0, 0, 256, 256);
+      ctx.fillStyle = 'rgba(70, 84, 104, 0.30)'; ctx.fillRect(0, 0, 256, 256);
       ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = '#000';
-    } else { ctx.fillStyle = css('--done'); ctx.globalAlpha = 0.85; }
+    } else { ctx.fillStyle = '#2b7fd4'; ctx.globalAlpha = 0.7; }
     const draw = (key, b) => {
       const gbx = Math.floor(key / 65536), gby = key % 65536;
       for (let y = 0; y < 64; y++) for (let xb = 0; xb < 8; xb++) {
@@ -779,7 +779,7 @@ async function syncDropbox() {
 }
 
 $('#fogSel').value = fogStyle;
-$('#fogSel').onchange = e => { fogStyle = e.target.value; ls.set('fogStyle', fogStyle); fogLayer.redraw(); };
+$('#fogSel').onchange = e => { fogStyle = e.target.value; ls.set('fogStyle2', fogStyle); fogLayer.redraw(); };
 $('#baseSel').value = BASES[ls.get('base')] ? ls.get('base') : 'epure';
 $('#baseSel').onchange = e => { ls.set('base', e.target.value); setBase(); };
 async function dataUi() {
