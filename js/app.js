@@ -19,12 +19,18 @@ const light = matchMedia('(prefers-color-scheme: light)');
 const map = L.map('map', { zoomControl: false, preferCanvas: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 0.5 }).setView([48.8566, 2.3522], 12);
 L.control.zoom({ position: 'topright' }).addTo(map);
 let base;
+const BASES = {
+  carto: () => ({ url: `https://{s}.basemaps.cartocdn.com/${light.matches ? 'light_all' : 'dark_all'}/{z}/{x}/{y}{r}.png`, subdomains: 'abcd', maxNativeZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>' }),
+  osmfr: () => ({ url: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', subdomains: 'abc', maxNativeZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · OSM France' }),
+  osm: () => ({ url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: '', maxNativeZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' }),
+};
 function setBase() {
   if (base) base.remove();
-  base = L.tileLayer(`https://{s}.basemaps.cartocdn.com/${light.matches ? 'light_all' : 'dark_all'}/{z}/{x}/{y}{r}.png`, {
-    maxZoom: 19, subdomains: 'abcd', referrerPolicy: 'no-referrer',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
-  }).addTo(map);
+  const b = (BASES[ls.get('base')] || BASES.carto)();
+  base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: b.maxNativeZoom, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution }).addTo(map);
   base.bringToBack();
 }
 setBase(); light.addEventListener?.('change', () => { setBase(); redrawAll(); });
@@ -649,6 +655,8 @@ async function syncDropbox() {
   } catch (e) { toast(e.message, true); fogStatus(fogMeta); dbxUi(); }
 }
 
+$('#baseSel').value = ls.get('base') || 'carto';
+$('#baseSel').onchange = e => { ls.set('base', e.target.value); setBase(); };
 $('#tol').value = radius; $('#tolV').textContent = Math.round(radius * 6);
 $('#tol').oninput = e => { radius = +e.target.value; $('#tolV').textContent = Math.round(radius * 6); };
 $('#tol').onchange = () => { ls.set('tol', radius); if (current) analyze(current, false); };
