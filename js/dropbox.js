@@ -129,12 +129,12 @@ export async function sync(cache = {}, onProgress = () => {}) {
       next[f.path_lower] = c;
       try { fog.addTile(tileIdFromName(f.name), await inflate(c.raw)); } catch (e) {}
     }
-    if (fog.size) return { fog, cache: next, source: `dossier Sync (${tiles.length} tuiles)`, date: latest(tiles) };
+    if (fog.size) return { fog, cache: next, kind: 'sync', source: `synchro auto (${tiles.length} tuiles)`, date: latest(tiles), folder: folder(), nFiles: files.length };
   }
   const snaps = files.filter(f => /\.fwss$/i.test(f.name)).sort((a, b) => b.server_modified.localeCompare(a.server_modified));
   if (!snaps.length) throw new Error(`Rien trouvé dans « ${folder()} » : ni dossier Sync, ni snapshot .fwss. Active la synchro Dropbox dans Fog of World, ou envoie un snapshot sur Dropbox.`);
   onProgress('Téléchargement du snapshot ' + snaps[0].name);
   const fog = await fogFromSnapshot((await download(snaps[0].path_lower)).buffer);
-  return { fog, cache: {}, source: 'snapshot ' + snaps[0].name, date: snaps[0].server_modified };
+  return { fog, cache: {}, kind: 'snapshot', source: 'snapshot ' + snaps[0].name, date: snaps[0].server_modified, folder: folder(), nFiles: files.length, dirs: [...new Set(files.map(f => f.path_display.split('/').slice(0, -1).join('/')))].slice(0, 8) };
 }
 const latest = fs => fs.map(f => f.server_modified).sort().pop();

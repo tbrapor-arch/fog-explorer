@@ -30,6 +30,7 @@
   <nav class="tabs" role="tablist">
     <button role="tab" data-tab="commune" aria-selected="true">Commune</button>
     <button role="tab" data-tab="route">Itinéraire</button>
+    <button role="tab" data-tab="idf">IDF</button>
     <button role="tab" data-tab="data">Données</button>
   </nav>
 
@@ -45,8 +46,6 @@
     </div>
     <button id="viewHere" class="btn ghost small">Analyser la zone affichée</button>
     <div id="communeOut"></div>
-    <h3>Ma conquête de l'Île-de-France</h3>
-    <div id="conquest"><button id="conquestBtn" class="btn">Carte de mes communes</button></div>
   </div>
 
   <!-- ROUTE -->
@@ -93,6 +92,15 @@
     <label class="check"><input type="checkbox" id="charm" checked> Privilégier petites rues, passages et escaliers</label>
     <button id="go" class="btn primary">Trouver des rues nouvelles</button>
     <div id="routeOut"></div>
+  </div>
+
+  <!-- IDF -->
+  <div class="pane" data-pane="idf" hidden>
+    <h3>Mon plus grand réseau</h3>
+    <div id="netOut"><button id="netBtn" class="btn">Calculer mon plus grand réseau</button></div>
+    <h3>Mes communes</h3>
+    <div id="conquest"><button id="conquestBtn" class="btn">Afficher la carte de mes communes</button></div>
+    <div id="comTable"></div>
   </div>
 
   <!-- DATA -->

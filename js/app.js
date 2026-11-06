@@ -3,6 +3,7 @@ import { fetchWays, fetchStations, cellsFor, gunzipJSON, decodeTile, tilesFor, b
 import { Graph, routesAB, routesLoop, routeCommune, toGPX } from './route.js';
 import { idbGet, idbSet, wipeAll, ls } from './store.js';
 import * as dbx from './dropbox.js';
+import { largestNetworks } from './network.js';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -45,40 +46,40 @@ setBase();
 // "brume": a veil over everything, cleared where you've walked (like Fog of World);
 // "traits": your traces drawn as coloured lines.
 let fogStyle = ls.get('fogStyle2') || 'traits';
-const FogLayer = L.GridLayer.extend({
-  createTile(c) {
-    const cv = document.createElement('canvas'); cv.width = cv.height = 256;
-    if (!fog) return cv;
-    const ctx = cv.getContext('2d');
-    const scale = Math.pow(2, c.z - 14);              // screen px per fog px
-    const dot = fogStyle === 'brume' ? Math.max(scale * 1.6, 3.5) : Math.max(scale * 1.2, 2.6); // keep thin trails readable when zoomed out
-    const off = (dot - scale) / 2;
-    const fx0 = c.x * 256 / scale, fy0 = c.y * 256 / scale, fsz = 256 / scale, m = Math.ceil(dot / scale);
-    const bx0 = Math.floor((fx0 - m) / 64), by0 = Math.floor((fy0 - m) / 64), bx1 = Math.floor((fx0 + fsz + m) / 64), by1 = Math.floor((fy0 + fsz + m) / 64);
-    if (fogStyle === 'brume') {
-      ctx.fillStyle = 'rgba(70, 84, 104, 0.30)'; ctx.fillRect(0, 0, 256, 256);
-      ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = '#000';
-    } else { ctx.fillStyle = '#2b7fd4'; ctx.globalAlpha = 0.7; }
-    const draw = (key, b) => {
-      const gbx = Math.floor(key / 65536), gby = key % 65536;
-      for (let y = 0; y < 64; y++) for (let xb = 0; xb < 8; xb++) {
-        const v = b[y * 8 + xb]; if (!v) continue;
-        for (let bit = 0; bit < 8; bit++) if (v & (0x80 >> bit)) {
-          const sx = ((gbx * 64 + xb * 8 + bit) - fx0) * scale - off, sy = ((gby * 64 + y) - fy0) * scale - off;
-          if (sx > 256 || sy > 256 || sx + dot < 0 || sy + dot < 0) continue;
-          ctx.fillRect(sx, sy, dot, dot);
-        }
+function paintFog(c, src, color, alpha) {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 256;
+  if (!src) return cv;
+  const ctx = cv.getContext('2d');
+  const scale = Math.pow(2, c.z - 14);              // screen px per fog px
+  const brume = !color && fogStyle === 'brume';
+  const dot = brume ? Math.max(scale * 1.6, 3.5) : Math.max(scale * 1.2, 2.6); // keep thin trails readable when zoomed out
+  const off = (dot - scale) / 2;
+  const fx0 = c.x * 256 / scale, fy0 = c.y * 256 / scale, fsz = 256 / scale, m = Math.ceil(dot / scale);
+  const bx0 = Math.floor((fx0 - m) / 64), by0 = Math.floor((fy0 - m) / 64), bx1 = Math.floor((fx0 + fsz + m) / 64), by1 = Math.floor((fy0 + fsz + m) / 64);
+  if (brume) {
+    ctx.fillStyle = 'rgba(70, 84, 104, 0.30)'; ctx.fillRect(0, 0, 256, 256);
+    ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = '#000';
+  } else { ctx.fillStyle = color || '#2b7fd4'; ctx.globalAlpha = alpha || 0.7; }
+  const draw = (key, b) => {
+    const gbx = Math.floor(key / 65536), gby = key % 65536;
+    for (let y = 0; y < 64; y++) for (let xb = 0; xb < 8; xb++) {
+      const v = b[y * 8 + xb]; if (!v) continue;
+      for (let bit = 0; bit < 8; bit++) if (v & (0x80 >> bit)) {
+        const sx = ((gbx * 64 + xb * 8 + bit) - fx0) * scale - off, sy = ((gby * 64 + y) - fy0) * scale - off;
+        if (sx > 256 || sy > 256 || sx + dot < 0 || sy + dot < 0) continue;
+        ctx.fillRect(sx, sy, dot, dot);
       }
-    };
-    const n = (bx1 - bx0 + 1) * (by1 - by0 + 1);
-    if (n <= fog.size) {
-      for (let bx = bx0; bx <= bx1; bx++) for (let by = by0; by <= by1; by++) { const k = bx * 65536 + by, b = fog.blocks.get(k); if (b) draw(k, b); }
-    } else {
-      for (const [k, b] of fog.blocks) { const bx = Math.floor(k / 65536), by = k % 65536; if (bx >= bx0 && bx <= bx1 && by >= by0 && by <= by1) draw(k, b); }
     }
-    return cv;
-  },
-});
+  };
+  const n = (bx1 - bx0 + 1) * (by1 - by0 + 1);
+  if (n <= src.size) {
+    for (let bx = bx0; bx <= bx1; bx++) for (let by = by0; by <= by1; by++) { const k = bx * 65536 + by, b = src.blocks.get(k); if (b) draw(k, b); }
+  } else {
+    for (const [k, b] of src.blocks) { const bx = Math.floor(k / 65536), by = k % 65536; if (bx >= bx0 && bx <= bx1 && by >= by0 && by <= by1) draw(k, b); }
+  }
+  return cv;
+}
+const FogLayer = L.GridLayer.extend({ createTile(c) { return paintFog(c, fog); } });
 const fogLayer = new FogLayer({ maxZoom: 19, zIndex: 300 }).addTo(map);
 const streetsLayer = L.layerGroup().addTo(map);
 const outlineLayer = L.layerGroup().addTo(map);
@@ -309,7 +310,7 @@ function levelFromPct(p, touchedOrPos) {
   return touchedOrPos || p > 0 ? 1 : 0;
 }
 let pcts = {}; idbGet('pcts').then(v => { if (v) pcts = v; });
-function savePct(code, p) { pcts[code] = { p, t: Date.now() }; idbSet('pcts', pcts); if (conquestOn) drawConquest(); }
+function savePct(code, p) { pcts[code] = { p, t: Date.now(), f: fogMeta?.date || null }; idbSet('pcts', pcts); if (conquestOn) drawConquest(); }
 let idfFeats = null, touched = null, conquestOn = false;
 map.createPane('conq').style.zIndex = 250;
 const conqRenderer = L.canvas({ pane: 'conq' });
@@ -393,7 +394,7 @@ function drawConquest(refit = false) {
     if (refit) fit(gj.getBounds());
   }
   const tot = feats.length, vis = feats.filter(f => visited(f.code)).length;
-  const unknown = feats.filter(f => (touched[f.code] || 0) >= 4 && pcts[f.code] === undefined).length;
+  const unknown = feats.filter(f => (touched[f.code] || 0) >= 4 && (pcts[f.code] === undefined || (fogMeta?.date && pcts[f.code].f !== fogMeta.date))).length;
   const place = conqDept === 'all' ? "en Île-de-France" : (conqDept === '75' ? 'à Paris' : 'en ' + DEPTS[conqDept]);
   $('#conquest').innerHTML = `
     <div class="row">
@@ -417,7 +418,7 @@ function drawConquest(refit = false) {
       <span class="s"><span class="bar"><i style="width:${st.n ? 100 * st.v / st.n : 0}%"></i></span></span></li>`; }).join('')}</ul>` : ''}
     <div class="row wrap">
       <button id="conquestHide" class="btn small">Masquer la carte</button>
-      ${unknown ? `<button id="conquestCalc" class="btn small">Calculer le % de ${unknown} communes visitées</button>` : ''}
+      ${unknown ? `<button id="conquestCalc" class="btn small">Calculer / mettre à jour ${unknown} communes</button>` : ''}
     </div>
     <p id="conquestProg" class="muted small" hidden></p>`;
   $('#legend').innerHTML = conqView === 'visit'
@@ -430,15 +431,78 @@ function drawConquest(refit = false) {
   $$('#deptList li').forEach(li => li.onclick = () => { conqDept = li.dataset.d; ls.set('conqDept', conqDept); drawConquest(true); });
   $('#conquestHide').onclick = hideConquest;
   $('#conquestCalc')?.addEventListener('click', calcAll);
+  drawComTable(feats);
+}
+// ---- biggest uninterrupted network ----
+map.createPane('net').style.zIndex = 420;
+const netLayer = L.layerGroup();
+const NetFog = L.GridLayer.extend({ createTile(c) { return paintFog(c, netFog, '#7b3fe4', 0.85); } });
+let netFog = null, netRes = null;
+const netFogLayer = new NetFog({ pane: 'net', maxZoom: 19 });
+async function communeAt(lon, lat) {
+  try { await loadIdf(); } catch (e) { return null; }
+  const f = idfFeats.find(f => { const [s, w, n, e] = f.bbox; return lat >= s && lat <= n && lon >= w && lon <= e && inGeometry(lon, lat, f.geom); });
+  return f?.nom || null;
+}
+async function showNetwork(i = 0) {
+  if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); return; }
+  $('#netOut').innerHTML = '<p class="muted"><span class="spin"></span> Analyse de tes traces…</p>';
+  await new Promise(r => setTimeout(r, 30));
+  if (!netRes || netRes.fog !== fog) netRes = { fog, ...largestNetworks(fog, { gap: 2 }) };
+  const c = netRes.comps[i];
+  if (!c) { $('#netOut').innerHTML = '<p class="muted">Pas assez de traces.</p>'; return; }
+  streetsLayer.clearLayers(); outlineLayer.clearLayers(); routeLayer.clearLayers(); hlLayer.clearLayers();
+  $('#legend').innerHTML = '<span><i class="sq" style="background:#7b3fe4"></i>ce réseau</span><span><i class="sq" style="background:#2b7fd4"></i>le reste de tes traces</span>'; $('#legend').hidden = false;
+  netFog = c.map; netFogLayer.addTo(map); netFogLayer.redraw();
+  netLayer.clearLayers().addTo(map);
+  const A = [c.a[1], c.a[0]], B = [c.b[1], c.b[0]];
+  L.polyline([A, B], { pane: 'net', color: '#7b3fe4', weight: 3, dashArray: '8 6', interactive: false }).addTo(netLayer);
+  for (const p of [A, B]) L.circleMarker(p, { pane: 'net', radius: 7, color: '#fff', weight: 3, fillColor: '#7b3fe4', fillOpacity: 1 }).addTo(netLayer);
+  L.marker([(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], { pane: 'net', interactive: false, icon: L.divIcon({ className: '', iconSize: [0, 0], html: `<span class="rlab on">${km(c.dist)} à vol d'oiseau</span>` }) }).addTo(netLayer);
+  fit(L.latLngBounds([A, B]).pad(0.15));
+  const [na, nb] = await Promise.all([communeAt(...c.a), communeAt(...c.b)]);
+  const km2 = c.pixels * 40 / 1e6;
+  $('#netOut').innerHTML = `
+    <div class="stat">
+      <div class="big">${km(c.dist)}<small>à vol d'oiseau${na && nb ? `, de ${esc(na)} à ${esc(nb)}` : ''}</small></div>
+      <div class="kv"><span>${km2.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} km² explorés d'un seul tenant</span><span>${Math.round(c.share * 100)} % de tout ce que tu as exploré</span></div>
+      <div class="kv"><span>${netRes.pieces} morceaux séparés au total</span><span></span></div>
+    </div>
+    <div class="row wrap">${netRes.comps.slice(0, 5).map((x, j) => `<button class="btn small ${j === i ? 'primary' : ''}" data-net="${j}">${j === 0 ? 'Le plus grand' : '#' + (j + 1)} · ${km(x.dist)}</button>`).join('')}
+    <button id="netHide" class="btn small ghost">Masquer</button></div>
+    <p class="muted small">Un réseau = des zones explorées reliées sans interruption. Une coupure GPS de moins de ~12 m ne casse pas le réseau.</p>`;
+  $$('[data-net]').forEach(b => b.onclick = () => showNetwork(+b.dataset.net));
+  $('#netHide').onclick = () => { netFogLayer.remove(); netLayer.remove(); $('#netOut').innerHTML = '<button id="netBtn" class="btn">Calculer mon plus grand réseau</button>'; $('#netBtn').onclick = () => showNetwork(); };
+}
+$('#netBtn').onclick = () => showNetwork();
+
+// table: every commune with its %, level and when the % was last computed
+let tableAll = false, tableQ = '';
+const fmtDay = t => new Date(t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: '2-digit' });
+function drawComTable(feats) {
+  const rows = feats.filter(f => (tableAll || levelOf(f.code) > 0 || pcts[f.code]) && (!tableQ || f.nom.toLowerCase().includes(tableQ)))
+    .map(f => ({ f, p: pcts[f.code], lv: levelOf(f.code) }))
+    .sort((a, b) => (b.p?.p ?? -1) - (a.p?.p ?? -1) || a.f.nom.localeCompare(b.f.nom));
+  const stale = r => r.p && fogMeta?.date && r.p.f !== fogMeta.date;
+  $('#comTable').innerHTML = `
+    <div class="row"><input id="tableQ" type="search" placeholder="Filtrer les communes" value="${esc(tableQ)}" autocomplete="off">
+    <label class="check small"><input type="checkbox" id="tableAll" ${tableAll ? 'checked' : ''}> vierges aussi</label></div>
+    <ul class="list">${rows.slice(0, 400).map(r => `
+      <li data-code="${r.f.code}"><span class="n">${esc(r.f.nom)}</span><span class="v">${r.p ? Math.round(r.p.p * 100) + ' %' : '—'}</span>
+      <span class="s">${LEVELS[r.lv]} · ${r.p ? 'calculé le ' + fmtDay(r.p.t) + (stale(r) ? ' · <b>traces plus récentes depuis</b>' : '') : 'pas encore calculé'}</span></li>`).join('')}</ul>
+    ${rows.length > 400 ? `<p class="muted small">${rows.length - 400} autres : affine avec le filtre.</p>` : ''}`;
+  $('#tableQ').oninput = e => { tableQ = e.target.value.toLowerCase(); const pos = e.target.selectionStart; drawComTable(feats); const q = $('#tableQ'); q.focus(); q.setSelectionRange(pos, pos); };
+  $('#tableAll').onchange = e => { tableAll = e.target.checked; drawComTable(feats); };
+  $$('#comTable li[data-code]').forEach(li => li.onclick = () => { const f = idfFeats.find(x => x.code === li.dataset.code); showTab('commune'); $('#communeQ').value = f.nom; openCommune(f.code); });
 }
 function hideConquest() {
   conquestOn = false; conquestLayer.remove(); mapBtn?.classList.remove('on');
   $('#legend').innerHTML = legendStreets; $('#legend').hidden = !streetsLayer.getLayers().length;
-  $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Carte de mes communes</button>'; $('#conquestBtn').onclick = () => showConquest();
+  $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Afficher la carte de mes communes</button>'; $('#conquestBtn').onclick = () => showConquest();
 }
 async function showConquest(fromMap = false) {
   if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); showTab('data'); return; }
-  if (!fromMap) showTab('commune'); else $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === 'commune')), $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== 'commune'));
+  if (!fromMap) showTab('idf'); else $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === 'idf')), $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== 'idf'));
   $('#conquest').innerHTML = '<p class="muted"><span class="spin"></span> Chargement des 1 300 communes…</p>';
   $('#conquest').scrollIntoView({ block: 'nearest' });
   try {
@@ -463,7 +527,7 @@ L.Control.Conq = L.Control.extend({ onAdd() {
 new L.Control.Conq({ position: 'topright' }).addTo(map);
 let calcStop = false;
 async function calcAll() {
-  const list = idfFeats.filter(f => (touched[f.code] || 0) >= 4 && pcts[f.code] === undefined);
+  const list = idfFeats.filter(f => (touched[f.code] || 0) >= 4 && (pcts[f.code] === undefined || (fogMeta?.date && pcts[f.code].f !== fogMeta.date)));
   const btn = $('#conquestCalc'), prog = $('#conquestProg');
   calcStop = false; btn.textContent = 'Arrêter'; btn.onclick = () => (calcStop = true); prog.hidden = false;
   for (let i = 0; i < list.length && !calcStop; i++) {
@@ -473,7 +537,7 @@ async function calcAll() {
       const ways = await getWays(f.bbox, null);
       const net = buildNetwork(ways, fog, { radius });
       const st = summarize(net, s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, f.geom); });
-      pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now() };
+      pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now(), f: fogMeta?.date || null };
       idbSet('pcts', pcts);
       await new Promise(r => setTimeout(r, 1500)); // be gentle with the free Overpass servers
     } catch (e) { prog.textContent = e.message; await new Promise(r => setTimeout(r, 5000)); }
@@ -759,7 +823,7 @@ $('#dbxFolder').onchange = e => dbx.setFolder(e.target.value);
 $('#dbxAuto').onchange = e => ls.set('dbx_auto', e.target.checked ? '1' : '0');
 function dbxUi() {
   const on = dbx.isConnected();
-  $('#dbxStatus').textContent = on ? 'Connecté à Dropbox (lecture seule).' : 'Non connecté.';
+  if (on && ls.get('dbxLast')) $('#dbxStatus').innerHTML = ls.get('dbxLast'); else $('#dbxStatus').textContent = on ? 'Connecté à Dropbox (lecture seule).' : 'Non connecté.';
   $('#dbxConnect').hidden = on; $('#dbxSync').hidden = !on; $('#dbxOff').hidden = !on;
 }
 $('#dbxConnect').onclick = async () => { dbx.setAppKey($('#dbxKey').value); try { await dbx.connect(); } catch (e) { toast(e.message, true); } };
@@ -774,7 +838,12 @@ async function syncDropbox() {
     $('#dbxFolder').value = dbx.folder();
     fogMeta = { source: 'Dropbox, ' + r.source, date: r.date };
     await setFog(r.fog, fogMeta);
-    toast('Traces à jour depuis Dropbox.');
+    const when = new Date(r.date).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
+    $('#dbxStatus').innerHTML = r.kind === 'sync'
+      ? `Connecté · <b>synchro automatique active</b> : je lis le dossier Sync de Fog of World (dernière modification ${when}).`
+      : `Connecté · <b>synchro automatique pas encore active</b> : je n'ai trouvé que des snapshots manuels dans « ${esc(r.folder)} » (dernier : ${when}). Active la synchro Dropbox dans Fog of World (onglet nuage) pour que tout se mette à jour seul.<br><small>Dossiers vus : ${r.dirs.map(esc).join(' · ')}</small>`;
+    ls.set('dbxLast', $('#dbxStatus').innerHTML);
+    toast(r.kind === 'sync' ? 'Traces à jour (synchro auto Dropbox).' : 'Traces chargées depuis le dernier snapshot Dropbox.');
   } catch (e) { toast(e.message, true); fogStatus(fogMeta); dbxUi(); }
 }
 
