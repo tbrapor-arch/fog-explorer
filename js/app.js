@@ -803,8 +803,8 @@ $('#go').onclick = async () => {
         <div class="t"><span>${r.label}</span><span>+${km(r.fresh)} nouveaux</span></div>
         <div class="kv"><span>${km(r.len)} · ~${Math.round(r.len / 1000 / 4.5 * 60)} min</span><span>${pct(r.fresh, r.len)} % de rues nouvelles${mode === 'ab' && i ? ' · détour +' + pct(r.len - base, base) + ' %' : ''}</span></div>
         ${r.note ? `<div class="kv"><span>${esc(r.note)}</span></div>` : ''}
-        <div class="acts"><button class="btn small primary" data-kml="${i}">Ouvrir dans Maps (KML)</button><button class="btn small" data-gpx="${i}">GPX</button><a class="btn small ghost" data-gm="${i}" target="_blank" rel="noopener noreferrer">Itinéraire Google</a></div>
-      </div>`).join('') + `<p class="muted small">KML : le tracé exact en une ligne, à ouvrir dans Google Maps ou Google Earth. GPX : pour OsmAnd, Organic Maps ou Komoot. « Itinéraire Google » lance la navigation, mais Google recalcule entre 8 points de passage : le tracé peut différer.</p>`;
+        <div class="acts"><button class="btn small primary" data-kml="${i}">Tracé KML</button><button class="btn small" data-gpx="${i}">GPX</button><a class="btn small ghost" data-gm="${i}" target="_blank" rel="noopener noreferrer">Itinéraire Google</a></div>
+      </div>`).join('') + `<p class="muted small">KML / GPX : le tracé exact. Sur Android, Google Maps ne sait pas ouvrir ces fichiers : installe Organic Maps (gratuit, sans compte) ou OsmAnd, puis choisis-le « Toujours » à l'ouverture. Sur ordinateur : Google My Maps ou Google Earth. « Itinéraire Google » lance la navigation, mais Google recalcule entre 8 points de passage : le tracé peut différer.</p>`;
     $$('#routeOut .card').forEach(c => c.onclick = e => { if (!e.target.closest('.acts')) selectRoute(+c.dataset.i); });
     $$('[data-gpx]').forEach(b => b.onclick = () => saveGPX(routes[+b.dataset.gpx]));
     $$('[data-kml]').forEach(b => b.onclick = () => saveKML(routes[+b.dataset.kml]));
