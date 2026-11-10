@@ -33,7 +33,7 @@ Fog of World mesure une surface dévoilée. Cette surface inclut les immeubles e
   - Overpass et geo.api.gouv.fr : seulement en secours, si les données publiées avec l'appli sont absentes.
 - Le bouton « Ma position » place un point sur la carte. La position reste dans l'appareil et le GPS s'arrête quand l'appli passe en arrière-plan.
 - La synchro Dropbox est en lecture seule (OAuth PKCE, sans serveur ni secret). Le jeton reste dans ton navigateur.
-- Aucun traceur, aucun cookie, aucune police ou script externe. Leaflet et JSZip sont inclus dans `vendor/`.
+- Aucun traceur, aucun cookie, aucune police ou script externe. Leaflet, JSZip et la police Manrope (licence OFL) sont inclus dans `vendor/`.
 - Le bouton « Effacer toutes mes données » vide tout le stockage local et révoque le jeton Dropbox.
 
 ## Fluidité

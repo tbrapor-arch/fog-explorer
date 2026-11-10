@@ -9,7 +9,7 @@ const DEV = BUILD.startsWith('__');
 const CACHE = 'fog-explorer-' + BUILD;
 const SHELL = ['./', 'index.html', 'style.css', 'manifest.webmanifest', 'icon.svg', 'icon-192.png',
   'js/app.js', 'js/fog.js', 'js/streets.js', 'js/route.js', 'js/store.js', 'js/dropbox.js', 'js/network.js', 'js/data.js', 'js/worker.js',
-  'vendor/leaflet.js', 'vendor/leaflet.css', 'vendor/jszip.min.js', 'geo/departements-idf.geojson'];
+  'vendor/leaflet.js', 'vendor/leaflet.css', 'vendor/jszip.min.js', 'vendor/fonts/manrope-latin-wght-normal.woff2', 'vendor/fonts/manrope-latin-ext-wght-normal.woff2', 'geo/departements-idf.geojson'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))));
   self.skipWaiting();

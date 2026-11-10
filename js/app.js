@@ -73,9 +73,9 @@ function paintFog(c, src, color) {
   const fx0 = c.x * 256 / scale, fy0 = c.y * 256 / scale, fsz = 256 / scale, m = Math.ceil(dot / scale);
   const bx0 = Math.floor((fx0 - m) / 64), by0 = Math.floor((fy0 - m) / 64), bx1 = Math.floor((fx0 + fsz + m) / 64), by1 = Math.floor((fy0 + fsz + m) / 64);
   if (brume) {
-    ctx.fillStyle = 'rgba(70, 84, 104, 0.30)'; ctx.fillRect(0, 0, 256, 256);
+    ctx.fillStyle = 'rgba(86, 100, 104, 0.32)'; ctx.fillRect(0, 0, 256, 256);
     ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = '#000';
-  } else ctx.fillStyle = color || '#2b7fd4';
+  } else ctx.fillStyle = color || '#3c8a68';
   const h = (rs - 1) * scale + dot;
   const draw = (key, b) => {
     const ox = (Math.floor(key / 65536) * 64 - fx0) * scale - off, oy = ((key % 65536) * 64 - fy0) * scale - off;
@@ -481,7 +481,7 @@ async function showNetwork(i = 0) {
   const c = netRes?.comps[i];
   if (!c) { $('#netOut').innerHTML = '<p class="muted">Pas assez de traces.</p>'; return; }
   c.fog ||= FogMap.deserialize(c.map);
-  setLegend('idf', '<span><i class="sq" style="background:#7b3fe4"></i>ce réseau</span><span><i class="sq" style="background:#2b7fd4"></i>le reste de tes traces</span>');
+  setLegend('idf', '<span><i class="sq" style="background:#7b3fe4"></i>ce réseau</span><span><i class="sq" style="background:#3c8a68"></i>le reste de tes traces</span>');
   netFog = c.fog; netOn = true; netLayer.clearLayers(); tabLayers(); netFogLayer.redraw();
   const A = [c.a[1], c.a[0]], B = [c.b[1], c.b[0]];
   L.polyline([A, B], { pane: 'net', color: '#7b3fe4', weight: 3, dashArray: '8 6', interactive: false }).addTo(netLayer);
@@ -557,7 +557,7 @@ function showMe(p) {
   const at = [me.ll[1], me.ll[0]];
   if (!meMarker) {
     map.createPane('me').style.zIndex = 640;
-    meAcc = L.circle(at, { pane: 'me', radius: me.acc, color: css('--done'), weight: 1, opacity: .5, fillOpacity: .12, interactive: false }).addTo(map);
+    meAcc = L.circle(at, { pane: 'me', radius: me.acc, color: '#2a6fdb', weight: 1, opacity: .5, fillOpacity: .12, interactive: false }).addTo(map);
     meMarker = L.marker(at, { pane: 'me', interactive: false, icon: L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }) }).addTo(map);
   } else { meMarker.setLatLng(at); meAcc.setLatLng(at).setRadius(me.acc); }
   if (follow) { follow = false; map.setView(at, Math.max(map.getZoom(), 16)); }
