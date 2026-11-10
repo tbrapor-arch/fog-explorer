@@ -4,20 +4,20 @@
 @font-face { font-family: Manrope; font-weight: 200 800; font-display: swap; src: url(vendor/fonts/manrope-latin-ext-wght-normal.woff2) format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
 @font-face { font-family: Manrope; font-weight: 200 800; font-display: swap; src: url(vendor/fonts/manrope-latin-wght-normal.woff2) format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
 :root {
-  --paper: #f4efe4; --mist: #e7ece9;
-  --panel: #ffffff; --glass: rgba(255, 255, 255, .84); --panel-2: #eef2ef; --line: #d5ddd8;
-  --fg: #1d2b28; --muted: #55635f;
-  --new: #9a4f7d; --new-ink: #84406a; --done: #2f7d5b; --done-ink: #256349;
-  --accent: #2f7d5b; --accent-fg: #ffffff;
-  --danger: #b03a3a;
+  --paper: #f4efe4; --mist: #f4efe4;
+  --panel: #fffdf8; --glass: rgba(255, 253, 248, .84); --panel-2: #f5f0e6; --line: #e5ddcc;
+  --fg: #1c2530; --muted: #626a70;
+  --new: #e8890c; --new-ink: #a85a00; --done: #1786b0; --done-ink: #0f6787;
+  --accent: #e8890c; --accent-fg: #1c2530;
+  --danger: #b83232;
   --bg: var(--paper);
-  --lv0: #cdd5d1; --lv1: #dfe8c9; --lv2: #b7d5a2; --lv3: #7dbd8a; --lv4: #3f9a72; --lv5: #1d5c45;
-  --shadow: 0 8px 28px rgba(29, 43, 40, .14);
+  --lv0: #cfd3d2; --lv1: #f6e2b8; --lv2: #f0c060; --lv3: #e08a10; --lv4: #2a9fd0; --lv5: #0b5f85;
+  --shadow: 0 6px 24px rgba(52, 40, 18, .16);
   --font: Manrope, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --nav-h: calc(58px + env(safe-area-inset-bottom, 0px));
   --sheet-h: 44vh;
-  --contours: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='360' height='120' viewBox='0 0 360 120' fill='none' stroke='%232f7d5b' stroke-opacity='.16'%3E%3Cpath d='M-10 30C60 5 110 60 180 34S300 8 370 30M-10 52C60 27 110 82 180 56S300 30 370 52M-10 74C60 49 110 104 180 78S300 52 370 74M-10 96C60 71 110 126 180 100S300 74 370 96M-10 8C60-17 110 38 180 12S300-14 370 8'/%3E%3C/svg%3E");
+  --contours: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='360' height='120' viewBox='0 0 360 120' fill='none' stroke='%23846a3a' stroke-opacity='.18'%3E%3Cpath d='M-10 30C60 5 110 60 180 34S300 8 370 30M-10 52C60 27 110 82 180 56S300 30 370 52M-10 74C60 49 110 104 180 78S300 52 370 74M-10 96C60 71 110 126 180 100S300 74 370 96M-10 8C60-17 110 38 180 12S300-14 370 8'/%3E%3C/svg%3E");
   color-scheme: light;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -66,7 +66,7 @@ button, input, select { font: inherit; color: inherit; }
 .toast button { margin-left: 8px; border: 0; border-radius: 8px; padding: 4px 10px; background: var(--panel); color: var(--fg); font-weight: 650; cursor: pointer; }
 
 /* my position */
-.me { width: 18px; height: 18px; border-radius: 50%; background: #2a6fdb; border: 3px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.25), 0 2px 6px rgba(0,0,0,.35); }
+.me { width: 18px; height: 18px; border-radius: 50%; background: var(--done); border: 3px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.25), 0 2px 6px rgba(0,0,0,.35); }
 
 /* ---- bottom navigation ---- */
 .nav { position: fixed; z-index: 700; left: 0; right: 0; bottom: 0; height: var(--nav-h); padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -84,7 +84,7 @@ button, input, select { font: inherit; color: inherit; }
   transition: height .28s cubic-bezier(.2, .8, .2, 1); will-change: height; }
 .sheet.drag { transition: none; }
 .head { flex: none; padding: 7px 16px 9px; cursor: grab; touch-action: none; user-select: none; position: relative; }
-.grip { display: block; width: 38px; height: 4px; border-radius: 2px; background: #b9c4be; margin: 0 auto 7px; }
+.grip { display: block; width: 38px; height: 4px; border-radius: 2px; background: #d6cdb9; margin: 0 auto 7px; }
 .headline { display: flex; align-items: baseline; gap: 10px; min-height: 26px; }
 .headline b { font-size: 18px; font-weight: 800; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .headline span { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; flex: 1; text-align: right; }
@@ -132,7 +132,7 @@ input[type=range] { width: 100%; accent-color: var(--done); min-height: 28px; }
 
 .seg { display: flex; background: var(--panel-2); border-radius: 14px; padding: 4px; }
 .seg button { flex: 1; border: 0; background: none; color: var(--muted); font-weight: 650; font-size: 13px; padding: 8px 4px; border-radius: 9px; cursor: pointer; min-height: 38px; }
-.seg button.on { background: var(--panel); color: var(--fg); box-shadow: 0 1px 4px rgba(29,43,40,.16); }
+.seg button.on { background: var(--panel); color: var(--fg); box-shadow: 0 1px 4px rgba(52,40,18,.16); }
 
 .suggest { list-style: none; margin: 0; padding: 4px; position: absolute; z-index: 10; top: 100%; left: 0; right: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); max-height: 260px; overflow-y: auto; }
 .suggest li { padding: 9px 10px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; gap: 8px; }
@@ -144,7 +144,7 @@ input[type=range] { width: 100%; accent-color: var(--done); min-height: 28px; }
 .chips button { flex: none; border: 0; background: var(--panel-2); font-weight: 600; border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 
 /* ---- commune: how far along, and what the next level needs ---- */
-.hero { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; align-items: end; padding: 14px 16px 12px; border-radius: 18px; background: var(--contours) center / 360px 120px, linear-gradient(#f3f7f4, #f3f7f4); }
+.hero { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; align-items: end; padding: 14px 16px 12px; border-radius: 18px; background: var(--contours) center / 360px 120px, linear-gradient(var(--panel), var(--panel)); }
 .hero .pc { grid-row: span 2; font-size: 64px; line-height: .9; font-weight: 300; letter-spacing: -.05em; color: var(--done-ink); font-variant-numeric: tabular-nums; }
 .hero .pc i { font-style: normal; font-size: 22px; letter-spacing: 0; margin-left: 3px; font-weight: 500; }
 .hero .lv { font-weight: 800; font-size: 16px; display: flex; align-items: center; gap: 7px; }
