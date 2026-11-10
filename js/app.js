@@ -1,25 +1,40 @@
-import { FogMap, fogFromSnapshot, WORLD } from './fog.js';
-import { fetchWays, fetchStations, cellsFor, gunzipJSON, decodeTile, tilesFor, buildNetwork, summarize, inGeometry, geomBbox, distM } from './streets.js';
-import { Graph, routesAB, routesLoop, routeCommune, toGPX, toKML } from './route.js';
+import { FogMap, fogFromSnapshot } from './fog.js';
+import { inGeometry, distM, km } from './streets.js';
+import { toGPX, toKML } from './route.js';
 import { idbGet, idbSet, wipeAll, ls } from './store.js';
 import * as dbx from './dropbox.js';
-import { largestNetworks } from './network.js';
+import * as data from './data.js';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-const km = m => (m / 1000).toLocaleString('fr-FR', { maximumFractionDigits: m < 10000 ? 1 : 0 }) + ' km';
 const pct = (a, b) => b ? Math.round(100 * a / b) : 0;
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const phone = () => matchMedia('(max-width: 819px)').matches;
+const tick = () => new Promise(r => setTimeout(r, 0));
 
-let fog = null;
+let fog = null, fogMeta = null;
 let radius = +(ls.get('tol') || 2);
+
+// ---------------- worker: all the heavy computing happens there, the map stays fluid ----------------
+const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+let rid = 0; const pending = new Map();
+worker.onmessage = e => {
+  const { id, ok, err, prog } = e.data, p = pending.get(id);
+  if (!p) return;
+  if (prog) { p.onProg?.(...prog); return; }
+  pending.delete(id);
+  if (err !== undefined) p.rej(new Error(err)); else p.res(ok);
+};
+worker.onerror = () => { for (const p of pending.values()) p.rej(new Error("Le calcul n'a pas pu démarrer. Recharge la page.")); pending.clear(); };
+const rpc = (fn, arg, onProg) => new Promise((res, rej) => { const id = ++rid; pending.set(id, { res, rej, onProg }); worker.postMessage({ id, fn, arg }); });
+rpc('init', { base: document.baseURI });
 
 // ---------------- map ----------------
 const map = L.map('map', { zoomControl: false, preferCanvas: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 0.5 }).setView([48.8566, 2.3522], 12);
-L.control.zoom({ position: 'topright' }).addTo(map);
+if (matchMedia('(pointer: fine)').matches) L.control.zoom({ position: 'bottomright' }).addTo(map);
 window.__map = map; // handy for debugging from the console
-let base;
+let base, baseLabels;
 const BASES = {
   epure: () => ({ url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', subdomains: '', native: 16,
     labels: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', plain: true,
@@ -29,9 +44,8 @@ const BASES = {
   osm: () => ({ url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', subdomains: '',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' }),
 };
-let baseLabels;
 function setBase() {
-  if (base) base.remove(); if (baseLabels) baseLabels.remove();
+  if (base) base.remove(); if (baseLabels) baseLabels.remove(); baseLabels = null;
   const b = (BASES[ls.get('base')] || BASES.epure)();
   base = L.tileLayer(b.url, { maxZoom: 19, maxNativeZoom: b.native || 19, subdomains: b.subdomains, referrerPolicy: 'strict-origin', attribution: b.attribution, className: b.plain ? 'paper' : 'basemap' }).addTo(map);
   base.bringToBack();
@@ -42,34 +56,46 @@ function setBase() {
 }
 setBase();
 
-// Explored pixels layer (drawn from the decoded bitmaps, in this browser)
 // Explored pixels drawn from the decoded bitmaps, in this browser.
 // "brume": a veil over everything, cleared where you've walked (like Fog of World);
 // "traits": your traces drawn as coloured lines.
+// Pixels are painted by horizontal runs, and when zoomed out several rows are merged into one,
+// so a tile costs a few hundred rectangles instead of tens of thousands.
 let fogStyle = ls.get('fogStyle2') || 'traits';
-function paintFog(c, src, color, alpha) {
+function paintFog(c, src, color) {
   const cv = document.createElement('canvas'); cv.width = cv.height = 256;
   if (!src) return cv;
   const ctx = cv.getContext('2d');
   const scale = Math.pow(2, c.z - 14);              // screen px per fog px
   const brume = !color && fogStyle === 'brume';
   const dot = brume ? Math.max(scale * 1.6, 3.5) : Math.max(scale * 1.2, 2.6); // keep thin trails readable when zoomed out
-  const off = (dot - scale) / 2;
+  const off = (dot - scale) / 2, rs = scale >= 1 ? 1 : Math.min(64, Math.floor(1 / scale)), bw = 64 * scale;
   const fx0 = c.x * 256 / scale, fy0 = c.y * 256 / scale, fsz = 256 / scale, m = Math.ceil(dot / scale);
   const bx0 = Math.floor((fx0 - m) / 64), by0 = Math.floor((fy0 - m) / 64), bx1 = Math.floor((fx0 + fsz + m) / 64), by1 = Math.floor((fy0 + fsz + m) / 64);
   if (brume) {
     ctx.fillStyle = 'rgba(70, 84, 104, 0.30)'; ctx.fillRect(0, 0, 256, 256);
     ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = '#000';
-  } else { ctx.fillStyle = color || '#2b7fd4'; ctx.globalAlpha = alpha || 0.7; }
+  } else ctx.fillStyle = color || '#2b7fd4';
+  const h = (rs - 1) * scale + dot;
   const draw = (key, b) => {
-    const gbx = Math.floor(key / 65536), gby = key % 65536;
-    for (let y = 0; y < 64; y++) for (let xb = 0; xb < 8; xb++) {
-      const v = b[y * 8 + xb]; if (!v) continue;
-      for (let bit = 0; bit < 8; bit++) if (v & (0x80 >> bit)) {
-        const sx = ((gbx * 64 + xb * 8 + bit) - fx0) * scale - off, sy = ((gby * 64 + y) - fy0) * scale - off;
-        if (sx > 256 || sy > 256 || sx + dot < 0 || sy + dot < 0) continue;
-        ctx.fillRect(sx, sy, dot, dot);
+    const ox = (Math.floor(key / 65536) * 64 - fx0) * scale - off, oy = ((key % 65536) * 64 - fy0) * scale - off;
+    if (ox > 256 || oy > 256 || ox + bw + dot < 0 || oy + bw + dot < 0) return;
+    for (let y = 0; y < 64; y += rs) {
+      const sy = oy + y * scale;
+      if (sy > 256 || sy + h < 0) continue;
+      let start = -1;
+      for (let xb = 0; xb < 8; xb++) {
+        let v = b[y * 8 + xb];
+        for (let i = 1; i < rs; i++) v |= b[(y + i) * 8 + xb];
+        if (v === 255) { if (start < 0) start = xb * 8; continue; }
+        if (!v) { if (start >= 0) { ctx.fillRect(ox + start * scale, sy, (xb * 8 - start - 1) * scale + dot, h); start = -1; } continue; }
+        for (let bit = 0; bit < 8; bit++) {
+          const x = xb * 8 + bit;
+          if (v & (0x80 >> bit)) { if (start < 0) start = x; }
+          else if (start >= 0) { ctx.fillRect(ox + start * scale, sy, (x - start - 1) * scale + dot, h); start = -1; }
+        }
       }
+      if (start >= 0) ctx.fillRect(ox + start * scale, sy, (63 - start) * scale + dot, h);
     }
   };
   const n = (bx1 - bx0 + 1) * (by1 - by0 + 1);
@@ -81,44 +107,93 @@ function paintFog(c, src, color, alpha) {
   return cv;
 }
 const FogLayer = L.GridLayer.extend({ createTile(c) { return paintFog(c, fog); } });
-const fogLayer = new FogLayer({ maxZoom: 19, zIndex: 300 }).addTo(map);
+const fogLayer = new FogLayer({ maxZoom: 19, zIndex: 300, opacity: fogStyle === 'brume' ? 1 : 0.7 }).addTo(map);
 const streetsLayer = L.layerGroup().addTo(map);
 const outlineLayer = L.layerGroup().addTo(map);
 const routeLayer = L.layerGroup().addTo(map);
 const markerLayer = L.layerGroup().addTo(map);
 const hlLayer = L.layerGroup().addTo(map);
 
+// ---------------- sheet: three heights on a phone, dragged by its head ----------------
+const sheetEl = $('#sheet'), headEl = $('#head');
+const navH = () => $('.nav').offsetHeight;
+const SNAP = {
+  peek: () => headEl.offsetHeight + 1,
+  half: () => Math.round(innerHeight * 0.44),
+  full: () => Math.max(Math.round(innerHeight * 0.5), innerHeight - navH() - 70),
+};
+let sheetAt = 'half';
+function setSheet(at) { sheetAt = at; sheetEl.style.setProperty('--sheet-h', SNAP[at]() + 'px'); }
+const sheetPeek = () => { if (phone()) setSheet('peek'); };
+const sheetOpen = () => { if (sheetAt === 'peek') setSheet('half'); };
+{
+  let d = null;
+  headEl.addEventListener('pointerdown', e => {
+    if (!phone()) return;
+    d = { y: e.clientY, h: sheetEl.offsetHeight, t: performance.now(), moved: false, last: e.clientY, lastT: performance.now(), v: 0 };
+    headEl.setPointerCapture(e.pointerId); sheetEl.classList.add('drag');
+  });
+  headEl.addEventListener('pointermove', e => {
+    if (!d) return;
+    const dy = e.clientY - d.y, now = performance.now();
+    if (Math.abs(dy) > 5) d.moved = true;
+    if (now > d.lastT) d.v = (e.clientY - d.last) / (now - d.lastT);
+    d.last = e.clientY; d.lastT = now;
+    sheetEl.style.setProperty('--sheet-h', Math.max(SNAP.peek(), Math.min(SNAP.full(), d.h - dy)) + 'px');
+  });
+  const end = () => {
+    if (!d) return;
+    sheetEl.classList.remove('drag');
+    const order = ['peek', 'half', 'full'], i = order.indexOf(sheetAt);
+    if (!d.moved) setSheet(sheetAt === 'peek' ? 'half' : sheetAt === 'half' ? 'peek' : 'half');
+    else if (Math.abs(d.v) > 0.45) setSheet(order[Math.max(0, Math.min(2, i + (d.v < 0 ? 1 : -1)))]);
+    else { const h = sheetEl.offsetHeight; setSheet(order.reduce((a, b) => Math.abs(SNAP[b]() - h) < Math.abs(SNAP[a]() - h) ? b : a)); }
+    d = null;
+  };
+  headEl.addEventListener('pointerup', end); headEl.addEventListener('pointercancel', end);
+  headEl.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSheet(sheetAt === 'peek' ? 'half' : 'peek'); } });
+  addEventListener('resize', () => setSheet(sheetAt));
+  setSheet('half');
+}
+
 // fit bounds in the part of the map not covered by the panel
 function fit(bounds, maxZoom = 18) {
-  const phone = matchMedia('(max-width: 819px)').matches, sh = $('#sheet');
-  const opts = phone ? { paddingTopLeft: [20, 90], paddingBottomRight: [20, sh.classList.contains('min') ? 110 : sh.offsetHeight + 16] }
+  if (!bounds.isValid()) return;
+  const opts = phone() ? { paddingTopLeft: [20, 100], paddingBottomRight: [20, Math.min(SNAP[sheetAt](), SNAP.half()) + navH() + 16] }
     : { paddingTopLeft: [410, 30], paddingBottomRight: [30, 30] };
   map.fitBounds(bounds, { ...opts, maxZoom });
 }
 
 // ---------------- ui helpers ----------------
-function chip(text, state = '') { $('#chipText').textContent = text; $('#chip').className = 'chip ' + state; }
+function chip(text, state = '') { $('#chipText').textContent = text; $('#chip').className = 'chip ' + state; $('#busyBar').hidden = state !== 'busy'; }
+$('#chip').onclick = () => showTab('data');
 let toastT;
-function toast(msg, err = false) {
+function toast(msg, err = false, action) {
   const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (err ? ' err' : ''); t.hidden = false;
-  clearTimeout(toastT); toastT = setTimeout(() => (t.hidden = true), err ? 7000 : 3500);
+  if (action) { const b = document.createElement('button'); b.textContent = action.label; b.onclick = action.fn; t.append(b); }
+  clearTimeout(toastT); if (!action) toastT = setTimeout(() => (t.hidden = true), err ? 7000 : 3500);
 }
-function fogStatus(meta) {
-  if (!fog) { chip('Aucune donnée chargée'); $('#dataStatus').textContent = 'Aucune donnée. Charge un snapshot ou connecte Dropbox.'; return; }
-  const d = meta?.date ? new Date(meta.date).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' }) : '';
-  chip(`Traces : ${meta?.source || 'chargées'}${d ? ' · ' + d : ''}`, 'ok');
+const fmtWhen = d => new Date(d).toLocaleString('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+function fogStatus(meta = fogMeta) {
+  if (!fog) { chip('Aucune trace chargée'); $('#dataStatus').textContent = 'Aucune trace. Charge un snapshot ou connecte Dropbox.'; return; }
+  const d = meta?.date ? fmtWhen(meta.date) : '';
+  chip(d ? 'Traces du ' + d : 'Traces chargées', 'ok');
   $('#dataStatus').textContent = `${fog.countPixels().toLocaleString('fr-FR')} pixels explorés (≈ ${(fog.countPixels() * 40 / 1e6).toFixed(1)} km²) · source : ${meta?.source || '?'}${d ? ' · ' + d : ''}`;
 }
 async function setFog(f, meta) {
-  fog = f; touched = null; fogLayer.redraw(); fogStatus(meta);
-  await idbSet('fog', { ...f.serialize(), meta });
+  fog = f; touched = touchedP = null; netRes = null;
+  const ser = f.serialize();
+  rpc('setFog', ser);
+  fogLayer.redraw(); fogStatus(meta);
+  await idbSet('fog', { ...ser, meta });
   if (current) analyze(current, false);
+  if (conquestOn) showConquest();
 }
 
-// tabs + sheet
-// Each tab shows only its own layers on the map, with its own legend.
+// tabs. Each tab shows only its own layers on the map, with its own legend and its own headline.
 let curTab = 'commune';
-const legendFor = {};
+const legendFor = {}, heads = { commune: ['Commune', ''], route: ['Itinéraire', ''], idf: ['Île-de-France', ''], data: ['Données et réglages', ''] };
+function setHead(tab, title, sub = '') { heads[tab] = [title, sub]; if (tab === curTab) { $('#hTitle').textContent = title; $('#hSub').textContent = sub; } }
 function setLegend(tab, html) { if (html !== undefined) legendFor[tab] = html; if (tab !== curTab) return; const h = legendFor[curTab]; $('#legend').hidden = !h; if (h) $('#legend').innerHTML = h; }
 function tabLayers() {
   const want = {
@@ -133,285 +208,148 @@ function tabLayers() {
     if (on && !map.hasLayer(l)) map.addLayer(l); else if (!on && map.hasLayer(l)) map.removeLayer(l);
   }
   setLegend(curTab);
+  $('#idfBtn').setAttribute('aria-pressed', curTab === 'idf' && conquestOn);
 }
 function selectTab(t) {
   curTab = t;
-  $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === t));
+  $$('.nav button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === t));
   $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== t));
+  setHead(t, ...heads[t]);
   tabLayers();
-  if (t === 'idf' && fog && !conquestOn) showConquest(true);
+  if (t === 'idf' && fog && !conquestOn) showConquest();
 }
-$$('.tabs button').forEach(b => b.onclick = () => { selectTab(b.dataset.tab); $('#sheet').classList.remove('min'); });
-$('#grip').onclick = () => $('#sheet').classList.toggle('min');
-const showTab = t => { selectTab(t); $('#sheet').classList.remove('min'); };
+const showTab = t => { selectTab(t); sheetOpen(); };
+$$('.nav button').forEach(b => b.onclick = () => { if (curTab === b.dataset.tab && phone()) setSheet(sheetAt === 'peek' ? 'half' : 'peek'); else showTab(b.dataset.tab); });
 
-// ---------------- streets / commune analysis ----------------
-let current = null;          // { name, geom?, bbox, ways }
-const waysCache = new Map(); // bbox key -> ways (memory)
-let netCurrent = null;
-
-const CELL_DAYS = 30;
-const slimWays = ways => ways.map(w => ({ id: w.id, nodes: w.nodes, geometry: w.geometry.map(g => g && { lon: +g.lon.toFixed(6), lat: +g.lat.toFixed(6) }), tags: { highway: w.tags?.highway, name: w.tags?.name, width: w.tags?.width } }));
-async function getCell(c) {
-  if (waysCache.has(c.key)) return waysCache.get(c.key);
-  const st = await idbGet('cell:' + c.key);
-  if (st && Date.now() - st.t < CELL_DAYS * 864e5) { waysCache.set(c.key, st.ways); return st.ways; }
-  return null;
-}
-// ---- local street data (published with the app, downloaded once, kept on the phone) ----
-let manifest; // undefined = not checked yet, null = not available
-async function getManifest() {
-  if (manifest !== undefined) return manifest;
-  try { const r = await fetch('data/manifest.json', { cache: 'no-cache' }); manifest = r.ok ? await r.json() : null; }
-  catch (e) { manifest = (await idbGet('manifest')) || null; } // offline: use the last known one
-  if (manifest) idbSet('manifest', manifest);
-  return manifest;
-}
-const tileMem = new Map(); // decoded tiles, small LRU
-async function tileBytes(key, m) {
-  const id = 'tile:' + m.date + ':' + key;
-  let b = await idbGet(id);
-  if (!b) {
-    const r = await fetch('data/t/' + key + '.json.gz');
-    if (!r.ok) throw new Error('Données de rues indisponibles (' + r.status + ').');
-    b = new Uint8Array(await r.arrayBuffer());
-    await idbSet(id, b);
-  }
-  return b;
-}
-async function tileData(key, m) {
-  if (tileMem.has(key)) { const v = tileMem.get(key); tileMem.delete(key); tileMem.set(key, v); return v; }
-  const v = await gunzipJSON(await tileBytes(key, m));
-  tileMem.set(key, v); if (tileMem.size > 24) tileMem.delete(tileMem.keys().next().value);
-  return v;
-}
-async function getWays(bbox, _key, onProg = () => {}) {
-  const m = await getManifest();
-  if (!m) return getWaysOverpass(bbox, _key, onProg);
-  const keys = tilesFor(bbox, m.tileLat, m.tileLon).filter(k => m.tiles[k]);
-  const seen = new Set(), all = []; let d = 0;
-  onProg(0, keys.length);
-  for (const k of keys) {
-    for (const w of decodeTile(await tileData(k, m), bbox)) if (!seen.has(w.id)) { seen.add(w.id); all.push(w); }
-    onProg(++d, keys.length);
-  }
-  return all;
-}
-let stationsAll = null;
-async function localStations(bbox) {
-  const m = await getManifest(); if (!m) return null;
-  if (!stationsAll) {
-    let b = await idbGet('stations:' + m.date);
-    if (!b) { const r = await fetch('data/stations.json.gz'); if (!r.ok) return null; b = new Uint8Array(await r.arrayBuffer()); idbSet('stations:' + m.date, b); }
-    stationsAll = await gunzipJSON(b);
-  }
-  const [s, w, n, e] = bbox, seen = new Map();
-  for (const [name, lon, lat, kind] of stationsAll) {
-    if (lat < s || lat > n || lon < w || lon > e) continue;
-    const k = name + '|' + Math.round(lat * 200) + '|' + Math.round(lon * 200), prev = seen.get(k);
-    if (!prev) seen.set(k, { name, lon, lat, kind }); else if (!prev.kind.includes(kind)) prev.kind += ', ' + kind;
-  }
-  return [...seen.values()];
-}
-// one-time download of the whole region
-async function downloadAll(onProg) {
-  const m = await getManifest();
-  if (!m) throw new Error("Les données de toute l'Île-de-France ne sont pas encore publiées.");
-  try { await navigator.storage?.persist?.(); } catch (e) {}
-  const keys = Object.keys(m.tiles); let done = 0, bytes = 0;
-  const work = async () => { while (keys.length) { const k = keys.shift(); await tileBytes(k, m); bytes += m.tiles[k]; onProg(++done, Object.keys(m.tiles).length, bytes, m.bytes); } };
-  await Promise.all([work(), work(), work(), work()]);
-  await localStations([-90, -180, 90, 180]);
-  ls.set('allDownloaded', m.date);
-}
-
-// fallback: live Overpass, by cells. onProg(done, total), 2 at a time (the free servers allow 2 slots)
-async function getWaysOverpass(bbox, _key, onProg = () => {}) {
-  const cells = cellsFor(bbox), have = new Map(), missing = [];
-  for (const c of cells) { const w = await getCell(c); if (w) have.set(c.key, w); else missing.push(c); }
-  let done = cells.length - missing.length; onProg(done, cells.length);
-  const worker = async () => {
-    while (missing.length) {
-      const c = missing.shift();
-      const ways = slimWays(await fetchWays(c.bbox));
-      waysCache.set(c.key, ways); have.set(c.key, ways); idbSet('cell:' + c.key, { t: Date.now(), ways });
-      onProg(++done, cells.length);
-    }
-  };
-  await Promise.all([worker(), worker()]);
-  const seen = new Set(), all = [];
-  for (const ws of have.values()) for (const w of ws) if (!seen.has(w.id)) { seen.add(w.id); all.push(w); }
-  return all;
-}
-const progTxt = (what, d, t) => t > 1 && d < t ? `${what} : zone ${d + 1}/${t}…` : `${what}…`;
-
-function drawStreets(net, filter) {
-  streetsLayer.clearLayers();
-  const cNew = css('--new'), cDone = css('--done');
-  let line = [], state = null, lastB = null, lastW = -1;
-  const flush = () => {
-    if (line.length > 1) {
-      const w = net.ways[lastW];
-      L.polyline(line, state ? { color: cDone, weight: 2, opacity: .75, interactive: false }
-        : { color: cNew, weight: w.path ? 2.5 : 3.5, opacity: .95, dashArray: w.path ? '5 5' : null, interactive: false }).addTo(streetsLayer);
-    }
-    line = [];
-  };
-  for (const s of net.segs) {
-    if (filter && !filter(s)) { flush(); lastB = null; continue; }
-    if (s.w !== lastW || s.done !== state || s.a !== lastB) { flush(); const a = net.nodes.get(s.a); line.push([a[1], a[0]]); }
-    const b = net.nodes.get(s.b); line.push([b[1], b[0]]);
-    state = s.done; lastB = s.b; lastW = s.w;
-  }
-  flush();
-  setLegend('commune', legendStreets);
-}
-
-async function analyze(area, fitView = true) {
-  current = area;
-  const out = $('#communeOut');
-  if (!fog) { out.innerHTML = `<div class="empty"><b>Il manque tes traces.</b> Va dans l'onglet Données pour charger ton snapshot ou connecter Dropbox.</div>`; }
-  outlineLayer.clearLayers(); hlLayer.clearLayers();
-  if (area.geom) {
-    const gj = L.geoJSON(area.geom, { style: { color: css('--fg'), weight: 2, opacity: .7, fill: false, dashArray: '6 4' }, interactive: false }).addTo(outlineLayer);
-    if (fitView) fit(gj.getBounds());
-  }
-  if (!fog) return;
-  out.innerHTML = `<p class="muted"><span class="spin"></span> Chargement des rues de ${esc(area.name)}…</p>`;
-  chip('Chargement des rues…', 'busy');
-  try {
-    const ways = await getWays(area.bbox, area.key, (d, t) => { const m = progTxt('Téléchargement des rues de ' + area.name, d, t); chip(m, 'busy'); const p = $('#communeOut p.muted'); if (p) p.innerHTML = '<span class="spin"></span> ' + esc(m); });
-    chip('Croisement avec tes traces…', 'busy'); await new Promise(r => setTimeout(r, 0));
-    const net = buildNetwork(ways, fog, { radius });
-    const midIn = s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, area.geom); };
-    const filter = area.geom ? midIn : null;
-    netCurrent = { net, filter };
-    drawStreets(net, filter);
-    const st = summarize(net, filter || (() => true));
-    renderStats(area, st);
-    if (area.code) savePct(area.code, st.roads.total ? st.roads.done / st.roads.total : 0, { fin: st.finished, n: st.streets, km: st.roads.total });
-  } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
-  fogStatus(fogMeta);
-}
-
-function renderStats(area, st) {
-  const r = st.roads, p = st.paths;
-  const todo = [...st.byName.values()].map(e => ({ ...e, left: e.total - e.done })).filter(e => e.left > 30 && e.done < 0.9 * e.total).sort((a, b) => b.left - a.left);
-  const virgin = todo.filter(e => e.done < 1).length;
-  $('#communeOut').innerHTML = `
-    <div class="stat">
-      <div class="big">${pct(r.done, r.total)} %<small>des rues de ${esc(area.name)}</small></div>
-      <div class="bar"><i style="width:${pct(r.done, r.total)}%"></i></div>
-      <div class="kv"><span>${km(r.done)} faits sur ${km(r.total)}</span><span>reste ${km(r.total - r.done)}</span></div>
-      <div class="kv"><span><b>${st.finished}</b> rues finies sur ${st.streets}</span><span>${virgin} jamais foulées</span></div>
-      <div class="kv"><span>Chemins et allées : ${pct(p.done, p.total)} %</span><span>niveau : <b>${LEVELS[levelFromPct(r.total ? r.done / r.total : 0, true)]}</b></span></div>
-    </div>
-    ${area.geom ? `<button id="toCom" class="btn primary">Itinéraire pour cocher ${esc(area.name)}</button>` : ''}
-    <details class="todo"><summary>Rues à finir (${todo.length})</summary>
-    <ul class="list" id="todo">${todo.slice(0, 60).map((e, i) => `
-      <li data-i="${i}"><span class="n">${esc(e.name)}</span><span class="v">${km(e.left)}</span>
-      <span class="s">${e.done < 1 ? 'jamais parcourue' : pct(e.done, e.total) + ' % faite'} · ${km(e.total)} au total</span></li>`).join('')}</ul></details>`;
-  $('#toCom')?.addEventListener('click', () => { showTab('route'); setMode('com'); });
-  $$('#todo li').forEach(li => li.onclick = () => {
-    const e = todo[+li.dataset.i]; hlLayer.clearLayers();
-    const lines = e.segs.map(s => { const a = netCurrent.net.nodes.get(s.a), b = netCurrent.net.nodes.get(s.b); return [[a[1], a[0]], [b[1], b[0]]]; });
-    const pl = L.polyline(lines, { color: css('--fg'), weight: 7, opacity: .35, interactive: false }).addTo(hlLayer);
-    if (matchMedia('(max-width: 819px)').matches) $('#sheet').classList.add('min');
-    fit(pl.getBounds(), 17);
-  });
-}
-
-
-// ---------------- conquest: every commune of Île-de-France by level ----------------
-// Levels by % of street length walked. "Finie" stops at 90 %: a few streets are always
-// unreachable or badly mapped.
+// ---------------- levels ----------------
+// By % of street length walked. "Finie" stops at 90 %: a few streets are always unreachable or badly mapped.
 const LEVELS = ['Vierge', 'Traversée', 'Visitée', 'Explorée', 'Conquise', 'Finie'];
 const LEVEL_MIN = [0, 0, 0.10, 0.25, 0.50, 0.90];
 function levelFromPct(p, touchedOrPos) {
   for (let i = LEVELS.length - 1; i >= 2; i--) if (p >= LEVEL_MIN[i]) return i;
   return touchedOrPos || p > 0 ? 1 : 0;
 }
-let pcts = {}; idbGet('pcts').then(v => { if (v) pcts = v; });
+let pcts = {}; const pctsReady = idbGet('pcts').then(v => { if (v) pcts = v; });
+let touched = null, touchedP = null;
+const ensureTouched = () => touchedP ||= rpc('touched').then(c => (touched = c));
 // a commune's % is recomputed only when you have new traces in it (its explored-pixel count changed)
 const pxIn = code => touched ? (touched[code] || 0) : undefined;
-const isStale = code => { const e = pcts[code]; if (!e) return (touched?.[code] || 0) >= 4; if (e.px === undefined) return true; return touched ? e.px !== pxIn(code) : false; };
-async function savePct(code, p, extra = {}) {
-  if (!touched) { try { await loadIdf(); touched = computeTouched(); } catch (e) {} }
-  pcts[code] = { p, t: Date.now(), px: pxIn(code), ...extra }; idbSet('pcts', pcts); if (conquestOn) drawConquest(); }
-let idfFeats = null, touched = null, conquestOn = false;
+const beenIn = code => (touched?.[code] || 0) >= 4;
+const isStale = code => { const e = pcts[code]; if (!e) return beenIn(code); if (e.px === undefined) return true; return touched ? e.px !== pxIn(code) : false; };
+const levelOf = code => { const p = pcts[code]?.p; return p !== undefined ? levelFromPct(p, beenIn(code) || !touched) : beenIn(code) ? 1 : 0; };
+async function savePct(code, e) {
+  try { await ensureTouched(); } catch (err) {}
+  pcts[code] = { ...e, t: Date.now(), px: pxIn(code) }; idbSet('pcts', pcts);
+  if (conquestOn) drawConquest();
+}
+const lvDot = lv => `<i class="lvdot" style="background:var(--lv${lv})"></i>`;
+
+// ---------------- commune analysis ----------------
+let current = null; // { name, code?, geom?, bbox }
+let anaTok = 0;
+const progTxt = (what, d, t) => t > 1 && d < t ? `${what} : ${d}/${t}…` : `${what}…`;
+const legendStreets = $('#legend').innerHTML;
+
+function drawStreets(lines) {
+  streetsLayer.clearLayers();
+  const cNew = css('--new'), cDone = css('--done'), o = { interactive: false, smoothFactor: 1.3 };
+  if (lines.done.length) L.polyline(lines.done, { ...o, color: cDone, weight: 2, opacity: .75 }).addTo(streetsLayer);
+  if (lines.path.length) L.polyline(lines.path, { ...o, color: cNew, weight: 2.5, opacity: .95, dashArray: '5 5' }).addTo(streetsLayer);
+  if (lines.road.length) L.polyline(lines.road, { ...o, color: cNew, weight: 3.5, opacity: .95 }).addTo(streetsLayer);
+  setLegend('commune', legendStreets);
+}
+
+async function analyze(area, fitView = true) {
+  current = area; const tok = ++anaTok;
+  const out = $('#communeOut');
+  setHead('commune', area.name[0].toUpperCase() + area.name.slice(1));
+  outlineLayer.clearLayers(); hlLayer.clearLayers();
+  if (area.geom) {
+    const gj = L.geoJSON(area.geom, { style: { color: css('--fg'), weight: 2, opacity: .7, fill: false, dashArray: '6 4' }, interactive: false }).addTo(outlineLayer);
+    if (fitView) fit(gj.getBounds());
+  }
+  if (mode === 'com') $('#comName').textContent = area.geom ? area.name : "aucune (choisis-la dans l'onglet Commune)";
+  if (!fog) { out.innerHTML = `<div class="empty"><b>Il manque tes traces.</b> Va dans Données pour charger ton snapshot ou connecter Dropbox.</div>`; return; }
+  out.innerHTML = '<div class="skel" style="height:58px"></div><div class="skel" style="height:40px"></div><div class="skel" style="height:62px"></div>';
+  chip('Rues de ' + area.name + '…', 'busy');
+  try {
+    const r = await rpc('analyze', { bbox: area.bbox, geom: area.geom || null, radius }, (d, t) => chip(progTxt('Téléchargement des rues', d, t), 'busy'));
+    if (tok !== anaTok) return;
+    drawStreets(r.lines);
+    renderStats(area, r);
+    if (area.code) savePct(area.code, { p: r.roads.total ? r.roads.done / r.roads.total : 0, fin: r.finished, n: r.streets, km: r.roads.total });
+  } catch (e) { if (tok !== anaTok) return; out.innerHTML = `<div class="empty"><b>Impossible d'analyser ${esc(area.name)}.</b> ${esc(e.message)}</div>`; }
+  fogStatus();
+}
+
+function renderStats(area, r) {
+  const rd = r.roads, p = rd.total ? rd.done / rd.total : 0, P = Math.round(p * 100), lv = levelFromPct(p, true);
+  const nx = lv < 5 ? Math.max(lv + 1, 2) : 0, need = nx ? Math.max(0, LEVEL_MIN[nx] * rd.total - rd.done) : 0;
+  const next = !rd.total ? '' : nx
+    ? `<p class="next">Encore <b>${km(need)}</b> de rues nouvelles pour passer « ${LEVELS[nx]} ».</p>`
+    : `<p class="next">Commune finie. Il reste <b>${km(rd.total - rd.done)}</b> pour atteindre 100 %.</p>`;
+  $('#communeOut').innerHTML = `
+    <div class="hero">
+      <div class="pc">${P}<i>%</i></div>
+      <div class="lv">${lvDot(lv)}${LEVELS[lv]}</div>
+      <div class="km">${km(rd.done)} faits sur ${km(rd.total)} de rues</div>
+    </div>
+    <div class="ladder" aria-hidden="true">
+      <div class="track"><i style="width:${Math.min(100, p * 100)}%"></i></div>
+      ${[2, 3, 4, 5].map(i => `<span class="tick" style="left:${LEVEL_MIN[i] * 100}%"></span><span class="lab${i === lv ? ' on' : ''}" style="left:${LEVEL_MIN[i] * 100}%">${LEVELS[i]}</span>`).join('')}
+    </div>
+    ${next}
+    <div class="facts">
+      <div><b>${r.finished}<small> / ${r.streets}</small></b><span>rues finies</span></div>
+      <div><b>${r.virgin}</b><span>rues jamais foulées</span></div>
+      <div><b>${pct(r.paths.done, r.paths.total)}<small> %</small></b><span>des chemins et allées</span></div>
+    </div>
+    ${area.geom ? `<button id="toCom" class="btn primary">Itinéraire pour cocher ${esc(area.name)}</button>` : ''}
+    <details class="todo"><summary>Rues à finir (${r.todoCount})</summary>
+    <ul class="list" id="todo">${r.todo.map((e, i) => `
+      <li data-i="${i}"><span class="n">${esc(e.name)}</span><span class="v">${km(e.left)}</span>
+      <span class="s">${e.done < 1 ? 'jamais parcourue' : pct(e.done, e.total) + ' % faite'} · ${km(e.total)} au total</span></li>`).join('')}</ul>
+    ${r.todoCount > r.todo.length ? `<p class="muted small" style="padding:8px 0">Les ${r.todo.length} plus longues sont listées.</p>` : ''}</details>`;
+  setHead('commune', area.name[0].toUpperCase() + area.name.slice(1), `${P} % · ${LEVELS[lv]}`);
+  $('#toCom')?.addEventListener('click', () => { showTab('route'); setMode('com'); });
+  $$('#todo li').forEach(li => li.onclick = () => {
+    const e = r.todo[+li.dataset.i]; hlLayer.clearLayers();
+    const pl = L.polyline(e.lines, { color: css('--fg'), weight: 8, opacity: .35, interactive: false }).addTo(hlLayer);
+    sheetPeek(); setHead('commune', e.name, `reste ${km(e.left)}`);
+    fit(pl.getBounds(), 17);
+  });
+}
+
+// ---------------- conquest: every commune of Île-de-France by level ----------------
+let idfFeats = null, conquestOn = false;
 map.createPane('conq').style.zIndex = 250;
 const conqRenderer = L.canvas({ pane: 'conq' });
 const conquestLayer = L.layerGroup();
-
-async function loadIdf() {
-  if (idfFeats) return idfFeats;
-  const c = await idbGet('idfCommunes');
-  if (c && Date.now() - c.t < 90 * 864e5) return (idfFeats = c.f);
-  const [a, b] = await Promise.all([
-    fetch(`${GEO}?codeRegion=11&fields=nom,code&format=geojson&geometry=contour`).then(r => r.json()),
-    fetch(`${GEO}?codeDepartement=75&type=arrondissement-municipal&fields=nom,code&format=geojson&geometry=contour`).then(r => r.json()),
-  ]);
-  const f = [...a.features.filter(x => x.properties.code !== '75056'), ...(b.features || [])]
-    .filter(x => x.geometry).map(x => ({ nom: x.properties.nom, code: x.properties.code, geom: x.geometry, bbox: geomBbox(x.geometry) }));
-  idbSet('idfCommunes', { t: Date.now(), f });
-  return (idfFeats = f);
-}
-// counts fog pixels per commune (in this browser)
-function computeTouched() {
-  const cell = 0.02, grid = new Map(), counts = {};
-  idfFeats.forEach((f, i) => {
-    const [s, w, n, e] = f.bbox;
-    for (let x = Math.floor(w / cell); x <= Math.floor(e / cell); x++) for (let y = Math.floor(s / cell); y <= Math.floor(n / cell); y++) {
-      const k = x + ',' + y; (grid.get(k) || grid.set(k, []).get(k)).push(i);
-    }
-  });
-  for (const [key, b] of fog.blocks) {
-    const gbx = Math.floor(key / 65536), gby = key % 65536;
-    for (let y = 0; y < 64; y += 2) for (let x = 0; x < 64; x += 2) {
-      if (!(b[y * 8 + (x >> 3)] & (0x80 >> (x & 7)))) continue;
-      const lon = (gbx * 64 + x) / WORLD * 360 - 180;
-      const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (gby * 64 + y) / WORLD))) * 180 / Math.PI;
-      const cands = grid.get(Math.floor(lon / cell) + ',' + Math.floor(lat / cell));
-      if (!cands) continue;
-      for (const i of cands) {
-        const [s, w, n, e] = idfFeats[i].bbox;
-        if (lat < s || lat > n || lon < w || lon > e) continue;
-        if (inGeometry(lon, lat, idfFeats[i].geom)) { counts[idfFeats[i].code] = (counts[idfFeats[i].code] || 0) + 1; break; }
-      }
-    }
-  }
-  return counts;
-}
-const levelOf = code => {
-  const p = pcts[code]?.p;
-  if (p !== undefined) return levelFromPct(p, (touched[code] || 0) >= 4);
-  return (touched[code] || 0) >= 4 ? 1 : 0;
-};
 const DEPTS = { '75': 'Paris', '77': 'Seine-et-Marne', '78': 'Yvelines', '91': 'Essonne', '92': 'Hauts-de-Seine', '93': 'Seine-Saint-Denis', '94': 'Val-de-Marne', '95': "Val-d'Oise" };
 const deptOf = code => code.slice(0, 2);
 let conqDept = ls.get('conqDept') || 'all', conqView = ls.get('conqView') || 'visit', deptGeo = null;
-const legendStreets = $('#legend').innerHTML;
 const visited = code => levelOf(code) > 0;
-const pctTxt = (a, b) => (b ? Math.round(100 * a / b) : 0) + ' %';
 
 function drawConquest(refit = false) {
   conquestLayer.clearLayers();
   const cols = LEVELS.map((_, i) => css('--lv' + i)), n = LEVELS.map(() => 0);
   const feats = idfFeats.filter(f => conqDept === 'all' || deptOf(f.code) === conqDept);
-  const cVis = css('--done'), cNo = css('--lv0');
+  const cVis = css('--done'), cNo = css('--lv0'), cBg = css('--paper'), cFg = css('--fg');
+  // one shape per colour instead of one per commune: 1 300 layers became half a dozen
+  const groups = new Map();
   for (const f of feats) {
     const lv = levelOf(f.code); n[lv]++;
-    const p = pcts[f.code]?.p;
-    const fill = conqView === 'visit' ? (lv ? cVis : cNo) : cols[lv];
-    L.geoJSON(f.geom, { pane: 'conq', renderer: conqRenderer, interactive: false, style: { color: css('--bg'), weight: .7, fillColor: fill, fillOpacity: lv ? .55 : .18 } })
-      .addTo(conquestLayer);
+    const fill = conqView === 'visit' ? (lv ? cVis : cNo) : cols[lv], k = fill + (lv ? '|1' : '|0');
+    let g = groups.get(k); if (!g) groups.set(k, g = { fill, on: lv > 0, polys: [] });
+    if (f.geom.type === 'Polygon') g.polys.push(f.geom.coordinates); else for (const p of f.geom.coordinates) g.polys.push(p);
   }
+  for (const g of groups.values()) L.geoJSON({ type: 'MultiPolygon', coordinates: g.polys }, { pane: 'conq', renderer: conqRenderer, interactive: false, style: { color: cBg, weight: .7, fillColor: g.fill, fillOpacity: g.on ? .55 : .18 } }).addTo(conquestLayer);
   // department borders + labels
   const per = {};
   for (const f of idfFeats) { const d = deptOf(f.code); (per[d] ||= { n: 0, v: 0 }).n++; if (visited(f.code)) per[d].v++; }
   if (deptGeo) {
     const shown = deptGeo.features.filter(d => conqDept === 'all' || d.properties.code === conqDept);
-    const gj = L.geoJSON({ type: 'FeatureCollection', features: shown }, { pane: 'conq', renderer: conqRenderer, interactive: false, style: { color: css('--fg'), weight: 2.2, opacity: .8, fill: false } }).addTo(conquestLayer);
+    const gj = L.geoJSON({ type: 'FeatureCollection', features: shown }, { pane: 'conq', renderer: conqRenderer, interactive: false, style: { color: cFg, weight: 2.2, opacity: .8, fill: false } }).addTo(conquestLayer);
     if (conqDept === 'all') gj.eachLayer(l => {
       const c = l.feature.properties.code, st = per[c] || { n: 0, v: 0 };
       L.marker(l.getBounds().getCenter(), { pane: 'conq', interactive: false, icon: L.divIcon({ className: '', html: `<span class="dlab${'75 92 93 94'.includes(c) ? ' pc' : ''}"><b>${c}</b> ${st.v}/${st.n}</span>`, iconSize: [0, 0] }) }).addTo(conquestLayer);
@@ -420,8 +358,14 @@ function drawConquest(refit = false) {
   }
   const tot = feats.length, vis = feats.filter(f => visited(f.code)).length;
   const unknown = feats.filter(f => isStale(f.code)).length;
-  const place = conqDept === 'all' ? "en Île-de-France" : (conqDept === '75' ? 'à Paris' : 'en ' + DEPTS[conqDept]);
+  const place = conqDept === 'all' ? 'en Île-de-France' : (conqDept === '75' ? 'à Paris' : 'en ' + DEPTS[conqDept]);
+  const plur = vis > 1 ? 's' : '';
+  setHead('idf', conqDept === 'all' ? 'Île-de-France' : DEPTS[conqDept], `${vis} commune${plur} sur ${tot}`);
   $('#conquest').innerHTML = `
+    <div class="stat">
+      <div class="big">${vis}<small>commune${plur} visitée${plur} sur ${tot} ${place}</small></div>
+      <div class="bar"><i style="width:${tot ? 100 * vis / tot : 0}%"></i></div>
+    </div>
     <div class="row">
       <select id="conqDept" class="grow" aria-label="Zone">
         <option value="all">Toute l'Île-de-France</option>
@@ -432,18 +376,13 @@ function drawConquest(refit = false) {
       <button id="cvVisit" class="${conqView === 'visit' ? 'on' : ''}" role="radio" aria-checked="${conqView === 'visit'}">Visitée ou non</button>
       <button id="cvLevels" class="${conqView === 'levels' ? 'on' : ''}" role="radio" aria-checked="${conqView === 'levels'}">Niveaux</button>
     </div>
-    <div class="stat">
-      <div class="big">${vis}<small>communes visitées sur ${tot} ${place}</small></div>
-      <div class="bar"><i style="width:${tot ? 100 * vis / tot : 0}%"></i></div>
-    </div>
     ${conqView === 'levels' ? `<div class="levels">${LEVELS.map((l, i) => `<div><b>${n[i]}</b><span><i style="background:${cols[i]}"></i>${l}s</span></div>`).join('')}</div>
     <p class="muted small">En % des km de rues faites : traversée &lt; 10 %, visitée 10–25 %, explorée 25–50 %, conquise 50–90 %, finie ≥ 90 %.</p>` : ''}
     ${conqDept === 'all' ? `<ul class="list" id="deptList">${Object.entries(DEPTS).map(([c, nm]) => { const st = per[c] || { n: 0, v: 0 }; return `
       <li data-d="${c}"><span class="n">${c} · ${esc(nm)}</span><span class="v">${st.v}/${st.n}</span>
       <span class="s"><span class="bar"><i style="width:${st.n ? 100 * st.v / st.n : 0}%"></i></span></span></li>`; }).join('')}</ul>` : ''}
     <div class="row wrap">
-      <button id="conquestHide" class="btn small">Masquer la carte</button>
-      ${unknown ? `<button id="conquestCalc" class="btn small">Mettre à jour ${unknown} commune${unknown > 1 ? 's' : ''} avec de nouvelles traces</button>` : '<span class="muted small">Tout est à jour ✓</span>'}
+      ${unknown ? `<button id="conquestCalc" class="btn small primary">Mettre à jour ${unknown} commune${unknown > 1 ? 's' : ''} avec de nouvelles traces</button>` : '<span class="muted small">Tous les pourcentages sont à jour.</span>'}
     </div>
     <p id="conquestProg" class="muted small" hidden></p>`;
   setLegend('idf', conqView === 'visit'
@@ -453,36 +392,103 @@ function drawConquest(refit = false) {
   $('#cvVisit').onclick = () => { conqView = 'visit'; ls.set('conqView', conqView); drawConquest(); };
   $('#cvLevels').onclick = () => { conqView = 'levels'; ls.set('conqView', conqView); drawConquest(); };
   $$('#deptList li').forEach(li => li.onclick = () => { conqDept = li.dataset.d; ls.set('conqDept', conqDept); drawConquest(true); });
-  $('#conquestHide').onclick = hideConquest;
   $('#conquestCalc')?.addEventListener('click', calcAll);
   drawComTable(feats);
 }
+
+// table: every commune with its %, level and when the % was last computed
+let tableAll = false, tableQ = '';
+const fmtDay = t => new Date(t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: '2-digit' });
+function drawComTable(feats) {
+  const rows = feats.filter(f => (tableAll || levelOf(f.code) > 0 || pcts[f.code]) && (!tableQ || f.key.includes(tableQ)))
+    .map(f => ({ f, p: pcts[f.code], lv: levelOf(f.code) }))
+    .sort((a, b) => (b.p?.p ?? -1) - (a.p?.p ?? -1) || a.f.nom.localeCompare(b.f.nom));
+  const stale = r => r.p && isStale(r.f.code);
+  const list = () => `${rows.slice(0, 400).map(r => `
+      <li data-code="${r.f.code}"><span class="n">${lvDot(r.lv)}${esc(r.f.nom)}</span><span class="v">${r.p ? Math.round(r.p.p * 100) + ' %' : '—'}</span>
+      <span class="s">${LEVELS[r.lv]} · ${r.p ? 'calculé le ' + fmtDay(r.p.t) + (stale(r) ? ' · <b>nouvelles traces depuis</b>' : '') : 'pas encore calculé'}</span></li>`).join('')}`;
+  if (!$('#tableQ')) {
+    $('#comTable').innerHTML = `
+      <div class="row"><input id="tableQ" type="search" placeholder="Filtrer les communes" autocomplete="off">
+      <label class="check small"><input type="checkbox" id="tableAll"> vierges aussi</label></div>
+      <ul class="list" id="tableList"></ul><p class="muted small" id="tableMore" hidden></p>`;
+    $('#tableQ').oninput = e => { tableQ = e.target.value.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); drawComTable(tableFeats); };
+    $('#tableAll').onchange = e => { tableAll = e.target.checked; drawComTable(tableFeats); };
+    $('#tableList').onclick = e => { const li = e.target.closest('li[data-code]'); if (li) { showTab('commune'); openCommune(li.dataset.code); } };
+  }
+  tableFeats = feats;
+  $('#tableList').innerHTML = list();
+  $('#tableMore').hidden = rows.length <= 400; $('#tableMore').textContent = `${rows.length - 400} autres : affine avec le filtre.`;
+}
+let tableFeats = [];
+function hideConquest() {
+  conquestOn = false; tabLayers();
+  setLegend('idf', ''); setHead('idf', 'Île-de-France');
+  $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Afficher la carte de mes communes</button>'; $('#conquestBtn').onclick = () => showConquest();
+}
+async function showConquest() {
+  if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); showTab('data'); return; }
+  if (!idfFeats) $('#conquest').innerHTML = '<div class="skel" style="height:64px"></div>';
+  try {
+    idfFeats = await data.loadCommunes();
+    deptGeo ||= await fetch('geo/departements-idf.geojson').then(r => r.json()).catch(() => null);
+    await Promise.all([ensureTouched(), pctsReady]);
+    const first = !conquestOn;
+    conquestOn = true; tabLayers();
+    drawConquest(first);
+    if (first && !deptGeo) fit(L.latLngBounds([[48.12, 1.45], [49.24, 3.56]]));
+  } catch (e) { hideConquest(); toast('Limites des communes indisponibles : ouvre une fois l\'appli avec du réseau pour les garder sur ce téléphone.', true); }
+}
+$('#conquestBtn').onclick = () => showConquest();
+map.on('zoomend', () => map.getContainer().classList.toggle('zlo', map.getZoom() < 11));
+map.getContainer().classList.toggle('zlo', map.getZoom() < 11);
+$('#idfBtn').onclick = () => {
+  if (curTab === 'idf' && conquestOn) { selectTab('commune'); return; }
+  sheetPeek(); selectTab('idf');
+};
+let calcStop = false;
+async function calcAll() {
+  const list = idfFeats.filter(f => isStale(f.code));
+  const btn = $('#conquestCalc'), prog = $('#conquestProg');
+  calcStop = false; btn.textContent = 'Arrêter'; btn.onclick = () => (calcStop = true); prog.hidden = false;
+  const online = !(await data.getManifest());
+  for (let i = 0; i < list.length && !calcStop; i++) {
+    const f = list[i];
+    prog.textContent = `${i + 1}/${list.length} : ${f.nom}…`;
+    try {
+      pcts[f.code] = { ...(await rpc('stats', { code: f.code, radius })), t: Date.now(), px: pxIn(f.code) };
+      if (i % 10 === 9) idbSet('pcts', pcts);
+      if (online) await new Promise(r => setTimeout(r, 1500)); // be gentle with the free Overpass servers
+    } catch (e) { prog.textContent = e.message; await new Promise(r => setTimeout(r, 5000)); }
+  }
+  idbSet('pcts', pcts);
+  drawConquest();
+}
+
 // ---- biggest uninterrupted network ----
 map.createPane('net').style.zIndex = 420;
 const netLayer = L.layerGroup();
-const NetFog = L.GridLayer.extend({ createTile(c) { return paintFog(c, netFog, '#7b3fe4', 0.85); } });
+const NetFog = L.GridLayer.extend({ createTile(c) { return paintFog(c, netFog, '#7b3fe4'); } });
 let netFog = null, netRes = null, netOn = false;
-const netFogLayer = new NetFog({ pane: 'net', maxZoom: 19 });
-async function communeAt(lon, lat) {
-  try { await loadIdf(); } catch (e) { return null; }
-  const f = idfFeats.find(f => { const [s, w, n, e] = f.bbox; return lat >= s && lat <= n && lon >= w && lon <= e && inGeometry(lon, lat, f.geom); });
-  return f?.nom || null;
-}
+const netFogLayer = new NetFog({ pane: 'net', maxZoom: 19, opacity: 0.85 });
+const netReset = () => { $('#netOut').innerHTML = '<button id="netBtn" class="btn">Calculer mon plus grand réseau</button>'; $('#netBtn').onclick = () => showNetwork(); };
 async function showNetwork(i = 0) {
   if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); return; }
-  $('#netOut').innerHTML = '<p class="muted"><span class="spin"></span> Analyse de tes traces…</p>';
-  await new Promise(r => setTimeout(r, 30));
-  if (!netRes || netRes.fog !== fog) netRes = { fog, ...largestNetworks(fog, { gap: 2 }) };
-  const c = netRes.comps[i];
+  if (!netRes) {
+    $('#netOut').innerHTML = '<p class="muted"><span class="spin"></span> Analyse de tes traces…</p>';
+    try { netRes = await rpc('network'); } catch (e) { netReset(); toast(e.message, true); return; }
+  }
+  const c = netRes?.comps[i];
   if (!c) { $('#netOut').innerHTML = '<p class="muted">Pas assez de traces.</p>'; return; }
+  c.fog ||= FogMap.deserialize(c.map);
   setLegend('idf', '<span><i class="sq" style="background:#7b3fe4"></i>ce réseau</span><span><i class="sq" style="background:#2b7fd4"></i>le reste de tes traces</span>');
-  netFog = c.map; netOn = true; netLayer.clearLayers(); tabLayers(); netFogLayer.redraw();
+  netFog = c.fog; netOn = true; netLayer.clearLayers(); tabLayers(); netFogLayer.redraw();
   const A = [c.a[1], c.a[0]], B = [c.b[1], c.b[0]];
   L.polyline([A, B], { pane: 'net', color: '#7b3fe4', weight: 3, dashArray: '8 6', interactive: false }).addTo(netLayer);
   for (const p of [A, B]) L.circleMarker(p, { pane: 'net', radius: 7, color: '#fff', weight: 3, fillColor: '#7b3fe4', fillOpacity: 1 }).addTo(netLayer);
   L.marker([(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], { pane: 'net', interactive: false, icon: L.divIcon({ className: '', iconSize: [0, 0], html: `<span class="rlab on">${km(c.dist)} à vol d'oiseau</span>` }) }).addTo(netLayer);
   fit(L.latLngBounds([A, B]).pad(0.15));
-  const [na, nb] = await Promise.all([communeAt(...c.a), communeAt(...c.b)]);
+  const [na, nb] = await Promise.all([data.communeAt(...c.a), data.communeAt(...c.b)]).then(x => x.map(f => f?.nom), () => []);
   const km2 = c.pixels * 40 / 1e6;
   $('#netOut').innerHTML = `
     <div class="stat">
@@ -494,129 +500,98 @@ async function showNetwork(i = 0) {
     <button id="netHide" class="btn small ghost">Masquer</button></div>
     <p class="muted small">Un réseau = des zones explorées reliées sans interruption. Une coupure GPS de moins de ~12 m ne casse pas le réseau.</p>`;
   $$('[data-net]').forEach(b => b.onclick = () => showNetwork(+b.dataset.net));
-  $('#netHide').onclick = () => { netOn = false; tabLayers(); if (conquestOn) drawConquest(); $('#netOut').innerHTML = '<button id="netBtn" class="btn">Calculer mon plus grand réseau</button>'; $('#netBtn').onclick = () => showNetwork(); };
+  $('#netHide').onclick = () => { netOn = false; tabLayers(); if (conquestOn) drawConquest(); netReset(); };
 }
 $('#netBtn').onclick = () => showNetwork();
 
-// table: every commune with its %, level and when the % was last computed
-let tableAll = false, tableQ = '';
-const fmtDay = t => new Date(t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: '2-digit' });
-function drawComTable(feats) {
-  const rows = feats.filter(f => (tableAll || levelOf(f.code) > 0 || pcts[f.code]) && (!tableQ || f.nom.toLowerCase().includes(tableQ)))
-    .map(f => ({ f, p: pcts[f.code], lv: levelOf(f.code) }))
-    .sort((a, b) => (b.p?.p ?? -1) - (a.p?.p ?? -1) || a.f.nom.localeCompare(b.f.nom));
-  const stale = r => r.p && isStale(r.f.code);
-  $('#comTable').innerHTML = `
-    <div class="row"><input id="tableQ" type="search" placeholder="Filtrer les communes" value="${esc(tableQ)}" autocomplete="off">
-    <label class="check small"><input type="checkbox" id="tableAll" ${tableAll ? 'checked' : ''}> vierges aussi</label></div>
-    <ul class="list">${rows.slice(0, 400).map(r => `
-      <li data-code="${r.f.code}"><span class="n">${esc(r.f.nom)}</span><span class="v">${r.p ? Math.round(r.p.p * 100) + ' %' : '—'}</span>
-      <span class="s">${LEVELS[r.lv]} · ${r.p ? 'calculé le ' + fmtDay(r.p.t) + (stale(r) ? ' · <b>nouvelles traces depuis</b>' : '') : 'pas encore calculé'}</span></li>`).join('')}</ul>
-    ${rows.length > 400 ? `<p class="muted small">${rows.length - 400} autres : affine avec le filtre.</p>` : ''}`;
-  $('#tableQ').oninput = e => { tableQ = e.target.value.toLowerCase(); const pos = e.target.selectionStart; drawComTable(feats); const q = $('#tableQ'); q.focus(); q.setSelectionRange(pos, pos); };
-  $('#tableAll').onchange = e => { tableAll = e.target.checked; drawComTable(feats); };
-  $$('#comTable li[data-code]').forEach(li => li.onclick = () => { const f = idfFeats.find(x => x.code === li.dataset.code); showTab('commune'); $('#communeQ').value = f.nom; openCommune(f.code); });
+// ---------------- commune search: all local, from the limits saved on the phone ----------------
+function addRecent(f) {
+  let r = []; try { r = JSON.parse(ls.get('recents') || '[]'); } catch (e) {}
+  r = [{ code: f.code, nom: f.nom }, ...r.filter(x => x.code !== f.code)].slice(0, 6);
+  ls.set('recents', JSON.stringify(r)); drawRecents();
 }
-function hideConquest() {
-  conquestOn = false; tabLayers(); mapBtn?.classList.remove('on');
-  setLegend('idf', '');
-  $('#conquest').innerHTML = '<button id="conquestBtn" class="btn">Afficher la carte de mes communes</button>'; $('#conquestBtn').onclick = () => showConquest();
+function drawRecents() {
+  let r = []; try { r = JSON.parse(ls.get('recents') || '[]'); } catch (e) {}
+  r = r.filter(x => x.code !== current?.code);
+  const el = $('#recents'); el.hidden = !r.length;
+  el.innerHTML = r.map(x => `<button data-code="${esc(x.code)}">${lvDot(levelOf(x.code))}${esc(x.nom)}</button>`).join('');
 }
-async function showConquest(fromMap = false) {
-  if (!fog) { toast("Charge d'abord tes traces (onglet Données).", true); showTab('data'); return; }
-  if (curTab !== 'idf') { curTab = 'idf'; $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.tab === 'idf')); $$('.pane').forEach(p => (p.hidden = p.dataset.pane !== 'idf')); }
-  $('#conquest').innerHTML = '<p class="muted"><span class="spin"></span> Chargement des 1 300 communes…</p>';
-  $('#conquest').scrollIntoView({ block: 'nearest' });
-  try {
-    await loadIdf();
-    if (!deptGeo) deptGeo = await fetch('geo/departements-idf.geojson').then(r => r.json()).catch(() => null);
-    if (!touched) touched = computeTouched();
-    conquestOn = true; mapBtn?.classList.add('on'); tabLayers();
-    drawConquest(true);
-    if (!deptGeo) fit(L.latLngBounds([[48.12, 1.45], [49.24, 3.56]]));
-  } catch (e) { hideConquest(); toast('Limites des communes indisponibles pour le moment.', true); }
-}
-$('#conquestBtn').onclick = () => showConquest();
-map.on('zoomend', () => map.getContainer().classList.toggle('zlo', map.getZoom() < 11));
-map.getContainer().classList.toggle('zlo', map.getZoom() < 11);
-// map button to open/close the commune map directly
-let mapBtn = null;
-L.Control.Conq = L.Control.extend({ onAdd() {
-  const b = L.DomUtil.create('button', 'mapbtn'); b.type = 'button'; b.textContent = 'IDF'; b.title = 'Carte de mes communes';
-  L.DomEvent.disableClickPropagation(b); b.onclick = () => { if (curTab === 'idf' && conquestOn) { selectTab('commune'); return; } if (matchMedia('(max-width: 819px)').matches) $('#sheet').classList.add('min'); selectTab('idf'); if (!conquestOn) showConquest(true); };
-  return (mapBtn = b);
-} });
-new L.Control.Conq({ position: 'topright' }).addTo(map);
-let calcStop = false;
-async function calcAll() {
-  const list = idfFeats.filter(f => isStale(f.code));
-  const btn = $('#conquestCalc'), prog = $('#conquestProg');
-  calcStop = false; btn.textContent = 'Arrêter'; btn.onclick = () => (calcStop = true); prog.hidden = false;
-  for (let i = 0; i < list.length && !calcStop; i++) {
-    const f = list[i];
-    prog.textContent = `${i + 1}/${list.length} : ${f.nom}…`;
-    try {
-      const ways = await getWays(f.bbox, null);
-      const net = buildNetwork(ways, fog, { radius });
-      const st = summarize(net, s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, f.geom); });
-      pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now(), px: pxIn(f.code), fin: st.finished, n: st.streets, km: st.roads.total };
-      idbSet('pcts', pcts);
-      await new Promise(r => setTimeout(r, manifest ? 30 : 1500)); // be gentle with the free Overpass servers
-    } catch (e) { prog.textContent = e.message; await new Promise(r => setTimeout(r, 5000)); }
-  }
-  drawConquest();
-}
-
-// commune search (geo.api.gouv.fr: official commune and arrondissement boundaries)
-const IDF = /^(75|77|78|91|92|93|94|95)/;
-const GEO = 'https://geo.api.gouv.fr/communes';
-let suggestT;
-$('#communeQ').addEventListener('input', e => {
-  clearTimeout(suggestT);
-  const q = e.target.value.trim(), ul = $('#communeList');
+$('#recents').onclick = e => { const b = e.target.closest('button[data-code]'); if (b) openCommune(b.dataset.code); };
+let suggestN = 0;
+$('#communeQ').addEventListener('input', async e => {
+  const q = e.target.value.trim(), ul = $('#communeList'), n = ++suggestN;
   if (q.length < 2) { ul.hidden = true; return; }
-  suggestT = setTimeout(async () => {
-    try {
-      const r = await fetch(`${GEO}?nom=${encodeURIComponent(q)}&type=commune-actuelle,arrondissement-municipal&fields=nom,code,codesPostaux,population&boost=population&limit=15`);
-      const list = (await r.json()).filter(c => IDF.test(c.code)).slice(0, 7);
-      ul.innerHTML = list.map(c => `<li data-code="${c.code}" data-nom="${esc(c.nom)}">${esc(c.nom)}<small>${c.codesPostaux?.[0] || c.code}</small></li>`).join('') || '<li class="muted">Aucune commune d\'Île-de-France</li>';
-      ul.hidden = false;
-      ul.querySelectorAll('li[data-code]').forEach(li => li.onclick = () => { ul.hidden = true; $('#communeQ').value = li.dataset.nom; openCommune(li.dataset.code); });
-    } catch (err) { ul.hidden = true; toast('Recherche de commune indisponible pour le moment.', true); }
-  }, 250);
-});
-async function openCommune(code) {
-  if (code === '75056') { toast('Paris est trop grand pour un seul calcul : choisis un arrondissement (ex. « Paris 13e »).', true); return; }
   try {
-    const r = await fetch(`${GEO}?code=${code}&type=commune-actuelle,arrondissement-municipal&fields=nom,code,contour`);
-    const c = (await r.json())[0];
-    if (!c?.contour) throw new Error();
-    ls.set('lastCommune', code);
-    analyze({ name: c.nom, code, geom: c.contour, bbox: geomBbox(c.contour), key: 'c' + code });
-  } catch (e) { toast('Impossible de récupérer les limites de cette commune.', true); }
+    const list = await data.searchCommunes(q, 8);
+    if (n !== suggestN) return;
+    ul.innerHTML = list.map(f => { const p = pcts[f.code]; return `<li data-code="${f.code}">${lvDot(levelOf(f.code))}<span>${esc(f.nom)} <small>${esc(f.cp)}</small></span><span class="r">${p ? Math.round(p.p * 100) + ' %' : ''}</span></li>`; }).join('') || '<li class="muted">Aucune commune d\'Île-de-France à ce nom</li>';
+    ul.hidden = false;
+  } catch (err) { ul.hidden = true; toast("Limites des communes indisponibles : ouvre une fois l'appli avec du réseau pour les garder sur ce téléphone.", true); }
+});
+$('#communeList').onclick = e => { const li = e.target.closest('li[data-code]'); if (li) { $('#communeList').hidden = true; $('#communeQ').blur(); openCommune(li.dataset.code); } };
+$('#communeQ').addEventListener('keydown', e => { if (e.key === 'Enter') $('#communeList li[data-code]')?.click(); });
+async function openCommune(code, fitView = true) {
+  let f;
+  try { f = await data.communeByCode(code); }
+  catch (e) { toast("Limites des communes indisponibles : ouvre une fois l'appli avec du réseau pour les garder sur ce téléphone.", true); return; }
+  if (!f) { toast('Commune introuvable.', true); return; }
+  ls.set('lastCommune', code); $('#communeQ').value = f.nom;
+  const p = analyze({ name: f.nom, code, geom: f.geom, bbox: f.bbox }, fitView);
+  addRecent(f);
+  return p;
 }
 $('#communeHere').onclick = () => locate(async ([lon, lat]) => {
-  try {
-    const r = await fetch(`${GEO}?lat=${lat}&lon=${lon}&type=commune-actuelle,arrondissement-municipal&fields=nom,code`);
-    const list = await r.json();
-    const c = list.find(x => x.code.startsWith('751')) || list[0];
-    if (!c) throw new Error();
-    $('#communeQ').value = c.nom; openCommune(c.code);
-  } catch (e) { toast('Commune introuvable pour ta position.', true); }
+  const f = await data.communeAt(lon, lat).catch(() => null);
+  if (f) openCommune(f.code); else toast("Tu n'es dans aucune commune d'Île-de-France connue.", true);
 });
 $('#viewHere').onclick = () => {
   if (map.getZoom() < 14) { toast('Zoome un peu plus (quartier) pour analyser la zone affichée.'); return; }
   const b = map.getBounds(), bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()];
-  analyze({ name: 'la zone affichée', geom: null, bbox, key: 'v' + bbox.map(x => x.toFixed(3)).join(',') }, false);
+  analyze({ name: 'la zone affichée', geom: null, bbox }, false); drawRecents();
 };
 
-// ---------------- geolocation / addresses ----------------
+// ---------------- my position (stays in this device) ----------------
+let watchId = null, me = null, meMarker = null, meAcc = null, follow = false;
+function showMe(p) {
+  me = { ll: [p.coords.longitude, p.coords.latitude], acc: p.coords.accuracy, t: Date.now() };
+  const at = [me.ll[1], me.ll[0]];
+  if (!meMarker) {
+    map.createPane('me').style.zIndex = 640;
+    meAcc = L.circle(at, { pane: 'me', radius: me.acc, color: css('--done'), weight: 1, opacity: .5, fillOpacity: .12, interactive: false }).addTo(map);
+    meMarker = L.marker(at, { pane: 'me', interactive: false, icon: L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }) }).addTo(map);
+  } else { meMarker.setLatLng(at); meAcc.setLatLng(at).setRadius(me.acc); }
+  if (follow) { follow = false; map.setView(at, Math.max(map.getZoom(), 16)); }
+  $('#locBtn').classList.remove('wait');
+}
+function stopWatch() {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null; me = null; meMarker?.remove(); meAcc?.remove(); meMarker = meAcc = null;
+  $('#locBtn').setAttribute('aria-pressed', false); $('#locBtn').classList.remove('wait');
+}
+function startWatch() {
+  if (!navigator.geolocation) { toast('Géolocalisation non disponible.', true); return; }
+  follow = true; $('#locBtn').setAttribute('aria-pressed', true); $('#locBtn').classList.add('wait');
+  watchId = navigator.geolocation.watchPosition(showMe, () => { stopWatch(); toast('Position refusée ou indisponible.', true); }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+}
+$('#locBtn').onclick = () => {
+  if (watchId === null) { startWatch(); return; }
+  if (me && map.distance(map.getCenter(), [me.ll[1], me.ll[0]]) > 60) map.setView([me.ll[1], me.ll[0]], Math.max(map.getZoom(), 16));
+  else stopWatch();
+};
+// no GPS while the app is in the background
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = -1; }
+  else if (!document.hidden && watchId === -1) watchId = navigator.geolocation.watchPosition(showMe, () => stopWatch(), { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+});
 function locate(cb) {
+  if (me && Date.now() - me.t < 15000) { cb(me.ll); return; }
   if (!navigator.geolocation) { toast('Géolocalisation non disponible.', true); return; }
   chip('Localisation…', 'busy');
-  navigator.geolocation.getCurrentPosition(p => { fogStatus(fogMeta); cb([p.coords.longitude, p.coords.latitude]); },
-    () => { fogStatus(fogMeta); toast('Position refusée ou indisponible.', true); }, { enableHighAccuracy: true, timeout: 15000 });
+  navigator.geolocation.getCurrentPosition(p => { fogStatus(); cb([p.coords.longitude, p.coords.latitude]); },
+    () => { fogStatus(); toast('Position refusée ou indisponible.', true); }, { enableHighAccuracy: true, timeout: 15000 });
 }
+
+// ---------------- addresses ----------------
 async function geocode(q) {
   const c = map.getCenter();
   for (const base of ['https://data.geopf.fr/geocodage/search', 'https://api-adresse.data.gouv.fr/search/']) {
@@ -637,7 +612,7 @@ function drawMarkers() {
   markerLayer.clearLayers();
   for (const [k, txt] of [['from', 'A'], ['to', 'B']]) {
     if (!pts[k] || (k === 'to' && mode !== 'ab')) continue;
-    L.marker([pts[k][1], pts[k][0]], { icon: L.divIcon({ className: '', html: `<div style="width:26px;height:26px;border-radius:50%;background:${css('--fg')};color:${css('--bg')};display:grid;place-items:center;font:700 13px system-ui;box-shadow:0 2px 6px rgba(0,0,0,.4)">${txt}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }) }).addTo(markerLayer);
+    L.marker([pts[k][1], pts[k][0]], { icon: L.divIcon({ className: '', html: `<div class="pin">${txt}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }) }).addTo(markerLayer);
   }
 }
 for (const id of ['fromQ', 'toQ']) {
@@ -659,15 +634,12 @@ let picking = null;
 $$('[data-pick]').forEach(b => b.onclick = () => {
   picking = picking === b.dataset.pick ? null : b.dataset.pick;
   $$('[data-pick]').forEach(x => x.classList.toggle('picking', x.dataset.pick === picking));
-  if (picking) { toast('Touche la carte pour placer le point.'); if (matchMedia('(max-width: 819px)').matches) $('#sheet').classList.add('min'); }
+  if (picking) { toast('Touche la carte pour placer le point.'); sheetPeek(); }
 });
 // tap anywhere on the map: quick stats of the commune there
 async function quickStats(f) {
   if (!pcts[f.code] || isStale(f.code)) {
-    const ways = await getWays(f.bbox, null);
-    const net = buildNetwork(ways, fog, { radius });
-    const st = summarize(net, s => { const a = net.nodes.get(s.a), b = net.nodes.get(s.b); return inGeometry((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, f.geom); });
-    pcts[f.code] = { p: st.roads.total ? st.roads.done / st.roads.total : 0, t: Date.now(), px: pxIn(f.code), fin: st.finished, n: st.streets, km: st.roads.total };
+    pcts[f.code] = { ...(await rpc('stats', { code: f.code, radius })), t: Date.now(), px: pxIn(f.code) };
     idbSet('pcts', pcts);
   }
   return pcts[f.code];
@@ -675,19 +647,18 @@ async function quickStats(f) {
 async function tapStats(latlng) {
   if (!fog) return;
   let f;
-  try { await loadIdf(); if (!touched) touched = computeTouched(); f = idfFeats.find(x => { const [s, w, n, e] = x.bbox; return latlng.lat >= s && latlng.lat <= n && latlng.lng >= w && latlng.lng <= e && inGeometry(latlng.lng, latlng.lat, x.geom); }); }
-  catch (e) { return; }
+  try { f = await data.communeAt(latlng.lng, latlng.lat); await ensureTouched(); } catch (e) { return; }
   if (!f) return;
   const pop = L.popup({ maxWidth: 260, className: 'qpop' }).setLatLng(latlng).setContent(`<b>${esc(f.nom)}</b><br><span class="spin"></span> calcul…`).openOn(map);
   try {
-    const e = await quickStats(f), lv = levelFromPct(e.p, (touched[f.code] || 0) >= 4);
+    const e = await quickStats(f), lv = levelFromPct(e.p, beenIn(f.code));
     pop.setContent(`<b>${esc(f.nom)}</b><div class="qbig">${Math.round(e.p * 100)} %<small> des rues · ${LEVELS[lv]}</small></div>
       ${e.n ? `<div class="qs">${e.fin} rues finies sur ${e.n} · ${km(e.km)} de rues</div>` : ''}
       <div class="qs">calculé le ${fmtDay(e.t)}</div>
       <div class="qa"><button class="btn small" data-q="detail">Détail</button><button class="btn small primary" data-q="route">La cocher</button></div>`);
     const el = pop.getElement();
-    el.querySelector('[data-q="detail"]').onclick = () => { map.closePopup(); showTab('commune'); $('#communeQ').value = f.nom; openCommune(f.code); };
-    el.querySelector('[data-q="route"]').onclick = async () => { map.closePopup(); $('#communeQ').value = f.nom; await openCommune(f.code); showTab('route'); setMode('com'); };
+    el.querySelector('[data-q="detail"]').onclick = () => { map.closePopup(); showTab('commune'); openCommune(f.code); };
+    el.querySelector('[data-q="route"]').onclick = async () => { map.closePopup(); openCommune(f.code); showTab('route'); setMode('com'); };
     if (conquestOn) drawConquest();
   } catch (err) { pop.setContent(`<b>${esc(f.nom)}</b><br>${esc(err.message)}`); }
 }
@@ -695,7 +666,7 @@ map.on('click', e => {
   if (!picking) { tapStats(e.latlng); return; }
   setPoint(picking, [e.latlng.lng, e.latlng.lat]);
   picking = null; $$('[data-pick]').forEach(x => x.classList.remove('picking'));
-  $('#sheet').classList.remove('min');
+  sheetOpen();
 });
 
 // ---------------- routing ----------------
@@ -714,25 +685,17 @@ $('#comKm').oninput = e => ($('#comKmV').textContent = e.target.value);
 $('#charm').checked = ls.get('charm') !== '0';
 $('#charm').onchange = e => ls.set('charm', e.target.checked ? '1' : '0');
 
-// stations (RER, Transilien, métro, tram) from OpenStreetMap, to start or finish at a station
-let stations = [];
-async function loadStations(bbox, key) {
-  const cached = (await getManifest()) ? null : await idbGet('st:' + key);
-  if (cached && Date.now() - cached.t < 30 * 864e5) return (stations = cached.list);
-  stations = (await localStations(bbox)) || await fetchStations(bbox);
-  idbSet('st:' + key, { t: Date.now(), list: stations });
-  return stations;
-}
+// start from a station (RER, Transilien, métro, tram)
 $('[data-station="from"]').onclick = async () => {
   const ul = $('.suggest[data-for="fromQ"]');
   const ref = pts.from || (current?.geom ? null : [map.getCenter().lng, map.getCenter().lat]);
   const bbox = current?.geom && !pts.from ? padBbox([[current.bbox[1], current.bbox[0]], [current.bbox[3], current.bbox[2]]], 800) : padBbox([ref], 2500);
   ul.innerHTML = '<li class="muted"><span class="spin"></span> Recherche des gares…</li>'; ul.hidden = false;
   try {
-    const list = await loadStations(bbox, bbox.map(x => x.toFixed(2)).join(','));
+    const list = await data.loadStations(bbox);
     const c = ref || [(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2];
     const near = list.map(x => ({ ...x, d: distM(...c, x.lon, x.lat) })).sort((a, b) => a.d - b.d).slice(0, 12);
-    ul.innerHTML = near.map((x, i) => `<li data-i="${i}">${esc(x.name)}<small>${esc(x.kind)} · ${km(x.d)}</small></li>`).join('') || '<li class="muted">Aucune gare trouvée ici</li>';
+    ul.innerHTML = near.map((x, i) => `<li data-i="${i}"><span>${esc(x.name)} <small>${esc(x.kind)}</small></span><span class="r">${km(x.d)}</span></li>`).join('') || '<li class="muted">Aucune gare trouvée ici</li>';
     ul.querySelectorAll('li[data-i]').forEach(li => li.onclick = () => { const x = near[+li.dataset.i]; ul.hidden = true; setPoint('from', [x.lon, x.lat], 'Gare ' + x.name); map.setView([x.lat, x.lon], 15); });
   } catch (e) { ul.innerHTML = `<li class="muted">${esc(e.message)}</li>`; }
 };
@@ -763,55 +726,30 @@ $('#go').onclick = async () => {
     if (d > 15000) { toast('A et B sont à plus de 15 km : découpe le trajet en étapes.', true); return; }
     bbox = padBbox([pts.from, pts.to], Math.max(500, d * 0.18));
   }
-  $('#go').disabled = true; out.innerHTML = `<p class="muted"><span class="spin"></span> Chargement des rues et calcul…</p>`;
+  const curMode = mode;
+  $('#go').disabled = true; out.innerHTML = `<p class="muted"><span class="spin"></span> <span id="routeSay">Chargement des rues…</span></p>`;
+  $('#busyBar').hidden = false;
   try {
-    const say = m => { const p = $('#routeOut p.muted'); if (p) p.innerHTML = '<span class="spin"></span> ' + esc(m); };
-    const ways = await getWays(bbox, null, (d, t) => say(progTxt('Téléchargement des rues', d, t)));
-    say('Croisement avec tes traces…'); await new Promise(r => setTimeout(r, 0));
-    const net = buildNetwork(ways, fog, { radius });
-    say('Calcul des itinéraires…'); await new Promise(r => setTimeout(r, 0));
-    const g = new Graph(net, { charm: $('#charm').checked });
-    const a = g.nearest(...pts.from);
-    if (a.dist > 300) throw new Error('Aucune rue piétonne près du départ.');
-    if (mode === 'loop') routes = routesLoop(g, a.node, target);
-    else if (mode === 'com') {
-      const geom = current.geom;
-      const inA = net.segs.map(s => { const p = net.nodes.get(s.a), q = net.nodes.get(s.b); return inGeometry((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, geom); });
-      let ends = [a.node], endNames = new Map();
-      if (toStation) {
-        const st = await loadStations(bbox, bbox.map(x => x.toFixed(2)).join(','));
-        ends = [];
-        for (const x of st) { const nn = g.nearest(x.lon, x.lat); if (nn.dist < 250) { ends.push(nn.node); endNames.set(nn.node, x.name); } }
-        if (!ends.length) throw new Error('Aucune gare trouvée autour de cette commune. Choisis « Retour au départ ».');
-      }
-      routes = [];
-      for (const [f, label] of [[0.6, 'Sortie courte'], [1, 'Sortie complète']]) {
-        const r = routeCommune(g, a.node, { budget: comBudget * f, inArea: si => inA[si], ends });
-        if (r && r.freshIn >= 100 && !routes.some(o => Math.abs(o.len - r.len) < 100)) routes.push({ ...r, label, note: `+${km(r.freshIn)} dans ${current.name}${endNames.has(r.end) ? ' · arrivée gare ' + endNames.get(r.end) : ''}` });
-      }
-      if (!routes.length) throw new Error(`Aucune rue nouvelle de ${current.name} n'est atteignable avec ${km(comBudget)} depuis ce départ. Augmente la longueur max ou pars d'une gare plus proche.`);
-    } else {
-      const b = g.nearest(...pts.to);
-      if (b.dist > 300) throw new Error("Aucune rue piétonne près de l'arrivée.");
-      routes = routesAB(g, a.node, b.node) || [];
-    }
-    if (!routes.length) throw new Error('Pas d\'itinéraire trouvé. Essaie une autre distance ou un autre départ.');
+    const say = m => { const p = $('#routeSay'); if (p) p.textContent = m; };
+    routes = await rpc('route', { mode: curMode, from: pts.from, to: pts.to, target, comBudget, toStation, geom: current?.geom || null, comName: current?.name || '', bbox, charm: $('#charm').checked, radius },
+      (d, t) => say(typeof d === 'string' ? d : progTxt('Téléchargement des rues', d, t)));
     // route tab shows only routes; the commune view keeps its own layers
     const base = routes[0].len;
     out.innerHTML = routes.map((r, i) => `
       <div class="card" data-i="${i}">
-        <div class="t"><span>${r.label}</span><span>+${km(r.fresh)} nouveaux</span></div>
-        <div class="kv"><span>${km(r.len)} · ~${Math.round(r.len / 1000 / 4.5 * 60)} min</span><span>${pct(r.fresh, r.len)} % de rues nouvelles${mode === 'ab' && i ? ' · détour +' + pct(r.len - base, base) + ' %' : ''}</span></div>
+        <div class="t"><span>${esc(r.label)}</span><span>+${km(r.fresh)} nouveaux</span></div>
+        <div class="split" title="Part de rues nouvelles"><i style="width:${pct(r.fresh, r.len)}%"></i></div>
+        <div class="kv"><span>${km(r.len)} · ~${Math.round(r.len / 1000 / 4.5 * 60)} min</span><span>${pct(r.fresh, r.len)} % de rues nouvelles${curMode === 'ab' && i ? ' · détour +' + pct(r.len - base, base) + ' %' : ''}</span></div>
         ${r.note ? `<div class="kv"><span>${esc(r.note)}</span></div>` : ''}
         <div class="acts"><button class="btn small primary" data-kml="${i}">Tracé KML</button><button class="btn small" data-gpx="${i}">GPX</button><a class="btn small ghost" data-gm="${i}" target="_blank" rel="noopener noreferrer">Itinéraire Google</a></div>
-      </div>`).join('') + `<p class="muted small">KML / GPX : le tracé exact. Sur Android, Google Maps ne sait pas ouvrir ces fichiers : installe Organic Maps (gratuit, sans compte) ou OsmAnd, puis choisis-le « Toujours » à l'ouverture. Sur ordinateur : Google My Maps ou Google Earth. « Itinéraire Google » lance la navigation, mais Google recalcule entre 8 points de passage : le tracé peut différer.</p>`;
+      </div>`).join('') + `<details class="howto"><summary>Ouvrir le tracé dans une appli de carte</summary><p class="muted small" style="margin-top:8px">KML / GPX : le tracé exact. Sur Android, Google Maps ne sait pas ouvrir ces fichiers : installe Organic Maps (gratuit, sans compte) ou OsmAnd, puis choisis-le « Toujours » à l'ouverture. Sur ordinateur : Google My Maps ou Google Earth. « Itinéraire Google » lance la navigation, mais Google recalcule entre 8 points de passage : le tracé peut différer.</p></details>`;
     $$('#routeOut .card').forEach(c => c.onclick = e => { if (!e.target.closest('.acts')) selectRoute(+c.dataset.i); });
     $$('[data-gpx]').forEach(b => b.onclick = () => saveGPX(routes[+b.dataset.gpx]));
     $$('[data-kml]').forEach(b => b.onclick = () => saveKML(routes[+b.dataset.kml]));
     $$('[data-gm]').forEach(a => (a.href = gmapsUrl(routes[+a.dataset.gm])));
     selectRoute(routes.length > 1 ? 1 : 0);
   } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
-  $('#go').disabled = false;
+  $('#go').disabled = false; $('#busyBar').hidden = true;
 };
 // All variants on the map. The selected one is coloured piece by piece:
 // orange = streets you've never walked, blue = already done. Others: thin, tap their label to pick.
@@ -824,14 +762,15 @@ function selectRoute(i) {
     L.polyline(r.coords.map(ll), { color: css('--muted'), weight: 3.5, opacity: .9, dashArray: '2 7', lineCap: 'round', interactive: false }).addTo(routeLayer);
   });
   const r = routes[i], cNew = css('--new'), cDone = css('--done');
-  const casing = L.polyline(r.coords.map(ll), { color: '#fff', weight: 10, opacity: .95, interactive: false }).addTo(routeLayer);
-  let run = [ll(r.coords[0])], state = r.isNew[0];
-  const flush = () => run.length > 1 && L.polyline(run, { color: state ? cNew : cDone, weight: 6, opacity: 1, lineCap: 'round', interactive: false }).addTo(routeLayer);
+  L.polyline(r.coords.map(ll), { color: '#fff', weight: 10, opacity: .95, interactive: false }).addTo(routeLayer);
+  const runs = { true: [], false: [] };
+  let run = [ll(r.coords[0])], state = !!r.isNew[0];
   for (let k = 0; k < r.isNew.length; k++) {
-    if (r.isNew[k] !== state) { flush(); run = [run[run.length - 1]]; state = r.isNew[k]; }
+    if (!!r.isNew[k] !== state) { runs[state].push(run); run = [run[run.length - 1]]; state = !!r.isNew[k]; }
     run.push(ll(r.coords[k + 1]));
   }
-  flush();
+  runs[state].push(run);
+  for (const s of [false, true]) if (runs[s].length) L.polyline(runs[s], { color: s ? cNew : cDone, weight: 6, opacity: 1, lineCap: 'round', interactive: false }).addTo(routeLayer);
   // labels to switch variant from the map
   routes.forEach((x, j) => {
     const at = x.coords[Math.floor(x.coords.length * (0.35 + 0.15 * j))] || x.coords[0];
@@ -839,10 +778,11 @@ function selectRoute(i) {
       .on('click', () => selectRoute(j)).addTo(routeLayer);
   });
   setLegend('route', `<span><i class="sw new" style="border-top-width:5px"></i>nouveau</span><span><i class="sw done" style="border-top-width:5px"></i>déjà fait</span>${routes.length > 1 ? `<span><i class="sw" style="border-color:${css('--muted')};border-top-style:dotted"></i>autres variantes</span>` : ''}`);
+  setHead('route', r.label, `${km(r.len)} · +${km(r.fresh)} nouveaux`);
   fit(L.latLngBounds(routes.flatMap(x => x.coords.map(ll))));
   $$('#routeOut .card').forEach(c => c.classList.toggle('sel', +c.dataset.i === i));
 }
-// share sheet first (Android offers Google Maps / Earth directly), plain download otherwise
+// share sheet first (Android offers the installed map apps directly), plain download otherwise
 async function handOff(text, type, filename) {
   const blob = new Blob([text], { type });
   try {
@@ -852,11 +792,9 @@ async function handOff(text, type, filename) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
-const fileName = (r, ext) => `fog-explorer-${r.label.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\W+/g, '-')}-${(r.len / 1000).toFixed(1).replace('.', ',')}km.${ext}`;
+const fileName = (r, ext) => `fog-explorer-${r.label.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\W+/g, '-')}-${(r.len / 1000).toFixed(1).replace('.', ',')}km.${ext}`;
 function saveKML(r) { handOff(toKML(r.coords, `Fog Explorer · ${r.label} · ${km(r.len)}`), 'application/vnd.google-earth.kml+xml', fileName(r, 'kml')); }
-function saveGPX(r) {
-  handOff(toGPX(r.coords, 'Fog Explorer – ' + r.label), 'application/gpx+xml', fileName(r, 'gpx'));
-}
+function saveGPX(r) { handOff(toGPX(r.coords, 'Fog Explorer – ' + r.label), 'application/gpx+xml', fileName(r, 'gpx')); }
 function gmapsUrl(r) {
   const c = r.coords, f = p => `${p[1].toFixed(6)},${p[0].toFixed(6)}`, n = 8, wps = [];
   for (let k = 1; k <= n; k++) wps.push(f(c[Math.floor(k * (c.length - 1) / (n + 1))]));
@@ -864,7 +802,6 @@ function gmapsUrl(r) {
 }
 
 // ---------------- data: file + Dropbox ----------------
-let fogMeta = null;
 $('#fileIn').onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   chip('Lecture du snapshot…', 'busy');
@@ -873,7 +810,8 @@ $('#fileIn').onchange = async e => {
     fogMeta = { source: f.name, date: f.lastModified };
     await setFog(fg, fogMeta);
     toast('Traces chargées.');
-  } catch (err) { toast(err.message, true); fogStatus(fogMeta); }
+    if (!current) startCommune();
+  } catch (err) { toast(err.message, true); fogStatus(); }
   e.target.value = '';
 };
 
@@ -897,12 +835,14 @@ async function syncDropbox() {
     const cache = (await idbGet('dbxCache')) || {};
     const r = await dbx.sync(cache, msg => chip(msg, 'busy'));
     $('#dbxFolder').value = dbx.folder();
-    if (r.unchanged && fog) { fogStatus(fogMeta); }
+    if (r.unchanged && fog) { fogStatus(); }
     else {
       if (r.unchanged) { await idbSet('dbxCache', {}); return syncDropbox(); } // no local traces anymore: fetch again
       await idbSet('dbxCache', r.cache);
+      const had = !!fog;
       fogMeta = { source: 'Dropbox, ' + r.source, date: r.date };
       await setFog(r.fog, fogMeta);
+      if (!had && !current) startCommune();
     }
     const when = new Date(r.date).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' });
     $('#dbxStatus').innerHTML = r.kind === 'sync'
@@ -910,34 +850,38 @@ async function syncDropbox() {
       : `Connecté · <b>synchro automatique pas encore active</b> : je n'ai trouvé que des snapshots manuels dans « ${esc(r.folder)} » (dernier : ${when}). Active la synchro Dropbox dans Fog of World (onglet nuage) pour que tout se mette à jour seul.<br><small>Dossiers vus : ${(r.dirs || []).map(esc).join(' · ')}</small>`;
     ls.set('dbxLast', $('#dbxStatus').innerHTML);
     if (!r.unchanged) toast(r.kind === 'sync' ? 'Nouvelles traces reçues (synchro auto Dropbox).' : 'Traces chargées depuis le dernier snapshot Dropbox.');
-  } catch (e) { toast(e.message, true); fogStatus(fogMeta); dbxUi(); }
+  } catch (e) { toast(e.message, true); fogStatus(); dbxUi(); }
 }
 
 $('#fogSel').value = fogStyle;
-$('#fogSel').onchange = e => { fogStyle = e.target.value; ls.set('fogStyle2', fogStyle); fogLayer.redraw(); };
+$('#fogSel').onchange = e => { fogStyle = e.target.value; ls.set('fogStyle2', fogStyle); fogLayer.setOpacity(fogStyle === 'brume' ? 1 : 0.7); fogLayer.redraw(); };
 $('#baseSel').value = BASES[ls.get('base')] ? ls.get('base') : 'epure';
 $('#baseSel').onchange = e => { ls.set('base', e.target.value); setBase(); };
+
+// ---- maps kept on the phone ----
 async function dataUi() {
-  const m = await getManifest(), el = $('#dataInfo'), btn = $('#dlAll');
-  if (!m) { el.textContent = "Rues téléchargées à la demande depuis OpenStreetMap (les données hors ligne de toute l'Île-de-France ne sont pas encore publiées)."; btn.hidden = true; return; }
-  const all = ls.get('allDownloaded') === m.date;
-  el.textContent = `Rues OpenStreetMap du ${new Date(m.date).toLocaleDateString('fr-FR')} · ${m.ways.toLocaleString('fr-FR')} voies · ${(m.bytes / 1e6).toFixed(0)} Mo pour toute l'Île-de-France.` + (all ? ' Tout est sur ce téléphone ✓' : ' Les zones regardées sont gardées sur le téléphone.');
-  btn.hidden = all; btn.textContent = `Tout télécharger maintenant (${(m.bytes / 1e6).toFixed(0)} Mo, une seule fois)`;
+  const m = await data.getManifest(), el = $('#dataInfo'), btn = $('#dlAll');
+  if (!m) { el.textContent = "Rues téléchargées à la demande depuis OpenStreetMap (les cartes de toute l'Île-de-France ne sont pas encore publiées)."; btn.hidden = true; return; }
+  const got = ls.get('allDownloaded'), all = got === m.date, mb = (m.bytes / 1e6).toFixed(0);
+  el.textContent = `Rues, gares${m.communes ? ' et limites des communes' : ''} du ${new Date(m.date).toLocaleDateString('fr-FR')} · ${m.ways.toLocaleString('fr-FR')} voies · ${mb} Mo pour toute l'Île-de-France. `
+    + (all ? 'Tout est sur ce téléphone : l\'appli marche sans réseau (sauf le fond de carte).' : got ? 'Une version plus récente est disponible.' : 'Chaque zone regardée est gardée sur ce téléphone.');
+  btn.hidden = all; btn.textContent = got ? `Mettre à jour les cartes (${mb} Mo)` : `Tout garder sur ce téléphone (${mb} Mo, une seule fois)`;
 }
 $('#dlAll').onclick = async () => {
   const btn = $('#dlAll'); btn.disabled = true;
-  try { await downloadAll((d, t, b, tb) => (btn.textContent = `Téléchargement… ${Math.round(100 * b / tb)} % (${(b / 1e6).toFixed(0)}/${(tb / 1e6).toFixed(0)} Mo)`)); toast("Toutes les rues d'Île-de-France sont sur ton téléphone."); }
+  try { await data.downloadAll((d, t, b, tb) => (btn.textContent = `Téléchargement… ${Math.round(100 * b / tb)} % (${(b / 1e6).toFixed(0)}/${(tb / 1e6).toFixed(0)} Mo)`)); toast("Toute l'Île-de-France est sur ton téléphone."); }
   catch (e) { toast(e.message, true); }
   btn.disabled = false; dataUi();
 };
+data.onDataUpdate(() => dataUi());
 dataUi();
 $('#prefetch').onclick = () => locate(async ll => {
   const btn = $('#prefetch'), bbox = padBbox([ll], 5000);
   btn.disabled = true;
   try {
-    await getWays(bbox, null, (d, t) => (btn.textContent = `Téléchargement… ${d}/${t} zones`));
-    btn.textContent = 'Rues à 5 km autour de toi prêtes ✓';
-  } catch (e) { btn.textContent = 'Réessayer le préchargement'; toast(e.message, true); }
+    await data.prefetch(bbox, (d, t) => (btn.textContent = `Téléchargement… ${d}/${t} zones`));
+    btn.textContent = 'Rues à 5 km autour de toi gardées';
+  } catch (e) { btn.textContent = 'Réessayer'; toast(e.message, true); }
   btn.disabled = false;
 });
 $('#tol').value = radius; $('#tolV').textContent = Math.round(radius * 6);
@@ -948,39 +892,53 @@ $('#wipe').onclick = () => ($('#wipeConfirm').hidden = false);
 $('#wipeNo').onclick = () => ($('#wipeConfirm').hidden = true);
 $('#wipeYes').onclick = async () => {
   if (dbx.isConnected()) await dbx.disconnect();
+  await rpc('setFog', null); await rpc('closeDb');
   await wipeAll();
-  fog = null; fogMeta = null; current = null; routes = []; pcts = {}; touched = null; idfFeats = null; hideConquest();
+  fog = null; fogMeta = null; current = null; routes = []; pcts = {}; touched = touchedP = null; netRes = null; netOn = false; hideConquest(); netReset(); stopWatch();
   [streetsLayer, outlineLayer, routeLayer, markerLayer, hlLayer].forEach(l => l.clearLayers());
-  fogLayer.redraw(); $('#communeOut').innerHTML = ''; $('#routeOut').innerHTML = ''; for (const k in legendFor) delete legendFor[k]; $('#legend').hidden = true;
-  $('#wipeConfirm').hidden = true; $('#dbxKey').value = ''; dbxUi(); fogStatus(null);
+  fogLayer.redraw(); $('#communeOut').innerHTML = ''; $('#routeOut').innerHTML = ''; $('#communeQ').value = ''; drawRecents();
+  for (const k in legendFor) delete legendFor[k]; $('#legend').hidden = true; setHead('commune', 'Commune'); setHead('route', 'Itinéraire');
+  $('#wipeConfirm').hidden = true; $('#dbxKey').value = ''; dbxUi(); fogStatus(null); dataUi();
   toast('Toutes tes données ont été effacées de cet appareil.');
 };
 
-function redrawAll() { fogLayer.redraw(); if (current) analyze(current, false); }
-
 // ---------------- startup ----------------
+function startCommune() {
+  const last = ls.get('lastCommune');
+  if (last) { openCommune(last); return; }
+  $('#communeOut').innerHTML = `<div class="empty"><b>Choisis une commune.</b> Tape son nom, touche <b>Ici</b> pour celle où tu es, ou touche la carte.</div>`;
+}
 (async () => {
-  dbxUi();
+  dbxUi(); drawRecents();
   try {
     if (await dbx.handleRedirect()) { dbxUi(); toast('Dropbox connecté.'); showTab('data'); await syncDropbox(); }
   } catch (e) { toast(e.message, true); }
   const saved = await idbGet('fog');
-  if (saved?.keys && !fog) { fog = FogMap.deserialize(saved); fogMeta = saved.meta; fogLayer.redraw(); }
-  fogStatus(fogMeta);
+  if (saved?.keys && !fog) {
+    fog = FogMap.deserialize(saved); fogMeta = saved.meta;
+    rpc('setFog', { keys: saved.keys, data: saved.data });
+    fogLayer.redraw();
+  }
+  fogStatus();
+  await pctsReady;
   if (dbx.isConnected() && ls.get('dbx_auto') !== '0' && !new URLSearchParams(location.search).has('nosync')) syncDropbox();
   if (!fog) {
     showTab('data');
-    $('#communeOut').innerHTML = `<div class="empty"><b>Commence par tes traces.</b> Dans Fog of World : Réglages → Snapshot → Take Snapshot, puis charge le fichier .fwss dans l'onglet Données. Ou connecte Dropbox pour que ce soit automatique.</div>`;
-  } else {
-    const last = ls.get('lastCommune');
-    if (last) openCommune(last);
-    else $('#communeOut').innerHTML = `<div class="empty">Cherche une commune pour voir tes rues manquantes, ou touche <b>Ici</b>.</div>`;
-  }
+    $('#communeOut').innerHTML = `<div class="empty"><b>Commence par tes traces.</b> Dans Fog of World : Réglages → Snapshot → Take Snapshot, puis charge le fichier .fwss dans Données. Ou connecte Dropbox pour que ce soit automatique.</div>`;
+  } else startCommune();
+  data.loadCommunes().then(drawRecents, () => {}); // have the commune limits on the phone from the first launch
 })();
 
 if ('serviceWorker' in navigator) {
+  const opened = Date.now();
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
-  // a new version took over: reload once so the screen shows it
-  let reloaded = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded && navigator.serviceWorker.controller) { reloaded = true; location.reload(); } });
+  // A new version took over. Just after opening, switch to it straight away; later, never
+  // interrupt what you are doing: offer it instead.
+  let done = false;
+  const had = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (done || !had) return; done = true;
+    if (Date.now() - opened < 4000 || document.hidden) location.reload();
+    else toast('Nouvelle version installée.', false, { label: 'Recharger', fn: () => location.reload() });
+  });
 }

@@ -6,7 +6,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://server.arcgisonline.com https://tile.openstreetmap.org https://*.tile.openstreetmap.fr; connect-src 'self' https://overpass-api.de https://overpass.kumi.systems https://overpass.private.coffee https://maps.mail.ru https://geo.api.gouv.fr https://data.geopf.fr https://api-adresse.data.gouv.fr https://api.dropboxapi.com https://content.dropboxapi.com; worker-src 'self' blob:; base-uri 'none'; object-src 'none'">
 <meta name="referrer" content="strict-origin">
 <meta name="robots" content="noindex, nofollow">
-<meta name="theme-color" content="#ffffff">
+<meta name="theme-color" content="#f4efe4">
 <title>Fog Explorer</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -17,35 +17,46 @@
 <body>
 <div id="map" aria-label="Carte"></div>
 
-<div id="chip" class="chip" role="status"><span class="dot"></span><span id="chipText">Aucune donnée chargée</span></div>
-<div id="legend" class="legend" hidden>
-  <span><i class="sw new"></i>à découvrir</span>
-  <span><i class="sw done"></i>déjà fait</span>
-  <span><i class="sw path"></i>chemin</span>
+<div class="top">
+  <button id="chip" class="chip" type="button" title="Mes données"><span class="dot"></span><span id="chipText">Aucune trace chargée</span></button>
+  <div id="legend" class="legend" hidden>
+    <span><i class="sw new"></i>à découvrir</span>
+    <span><i class="sw done"></i>déjà fait</span>
+    <span><i class="sw path"></i>chemin</span>
+  </div>
 </div>
+
+<div class="mapctl">
+  <button id="locBtn" class="mapbtn" type="button" title="Ma position" aria-pressed="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7.5" fill="none"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/></svg>
+  </button>
+  <button id="idfBtn" class="mapbtn" type="button" title="Carte de mes communes" aria-pressed="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" d="M3.5 6.5l5.5-2 6 2 5.5-2v13l-5.5 2-6-2-5.5 2z"/><path d="M9 4.5v13M15 6.5v13"/></svg>
+  </button>
+</div>
+
 <div id="toast" class="toast" role="alert" hidden></div>
 
 <section id="sheet" class="sheet" aria-label="Panneau">
-  <button id="grip" class="grip" aria-label="Agrandir ou réduire le panneau"><span></span></button>
-  <nav class="tabs" role="tablist">
-    <button role="tab" data-tab="commune" aria-selected="true">Commune</button>
-    <button role="tab" data-tab="route">Itinéraire</button>
-    <button role="tab" data-tab="idf">IDF</button>
-    <button role="tab" data-tab="data">Données</button>
-  </nav>
+  <div id="head" class="head" role="button" tabindex="0" aria-label="Agrandir ou réduire le panneau">
+    <span class="grip"></span>
+    <div class="headline"><b id="hTitle">Fog Explorer</b><span id="hSub"></span></div>
+    <i id="busyBar" class="busybar" hidden></i>
+  </div>
 
   <!-- COMMUNE -->
   <div class="pane" data-pane="commune">
     <div class="row">
       <div class="field grow">
         <label for="communeQ">Commune ou arrondissement</label>
-        <input id="communeQ" type="search" placeholder="Villejuif, Paris 13e…" autocomplete="off">
+        <input id="communeQ" type="search" placeholder="Villejuif, Paris 13e, 94800…" autocomplete="off" enterkeyhint="search">
         <ul id="communeList" class="suggest" hidden></ul>
       </div>
-      <button id="communeHere" class="btn ghost" title="Commune où je suis">Ici</button>
+      <button id="communeHere" class="btn" title="Commune où je suis">Ici</button>
     </div>
-    <button id="viewHere" class="btn ghost small">Analyser la zone affichée</button>
+    <div id="recents" class="chips" hidden></div>
     <div id="communeOut"></div>
+    <button id="viewHere" class="btn ghost small">Analyser plutôt la zone affichée</button>
   </div>
 
   <!-- ROUTE -->
@@ -59,9 +70,9 @@
       <label for="fromQ">Départ</label>
       <div class="row">
         <input id="fromQ" type="search" placeholder="Adresse" autocomplete="off">
-        <button class="btn ghost small" data-gps="from" title="Ma position">GPS</button>
-        <button class="btn ghost small" data-station="from" title="Partir d'une gare">Gare</button>
-        <button class="btn ghost small" data-pick="from" title="Toucher la carte">Carte</button>
+        <button class="btn small" data-gps="from" title="Ma position">GPS</button>
+        <button class="btn small" data-station="from" title="Partir d'une gare">Gare</button>
+        <button class="btn small" data-pick="from" title="Toucher la carte">Carte</button>
       </div>
       <ul class="suggest" data-for="fromQ" hidden></ul>
     </div>
@@ -69,8 +80,8 @@
       <label for="toQ">Arrivée</label>
       <div class="row">
         <input id="toQ" type="search" placeholder="Adresse" autocomplete="off">
-        <button class="btn ghost small" data-gps="to" title="Ma position">GPS</button>
-        <button class="btn ghost small" data-pick="to" title="Toucher la carte">Carte</button>
+        <button class="btn small" data-gps="to" title="Ma position">GPS</button>
+        <button class="btn small" data-pick="to" title="Toucher la carte">Carte</button>
       </div>
       <ul class="suggest" data-for="toQ" hidden></ul>
     </div>
@@ -96,17 +107,18 @@
 
   <!-- IDF -->
   <div class="pane" data-pane="idf" hidden>
-    <h3>Mon plus grand réseau</h3>
-    <div id="netOut"><button id="netBtn" class="btn">Calculer mon plus grand réseau</button></div>
     <h3>Mes communes</h3>
     <div id="conquest"><button id="conquestBtn" class="btn">Afficher la carte de mes communes</button></div>
-    <div id="comTable"></div>
+    <h3>Mon plus grand réseau</h3>
+    <div id="netOut"><button id="netBtn" class="btn">Calculer mon plus grand réseau</button></div>
+    <h3>Toutes mes communes</h3>
+    <div id="comTable"><p class="muted small">La liste apparaît avec la carte de tes communes.</p></div>
   </div>
 
   <!-- DATA -->
   <div class="pane" data-pane="data" hidden>
-    <h3>Mes données Fog of World</h3>
-    <p id="dataStatus" class="muted">Aucune donnée.</p>
+    <h3>Mes traces Fog of World</h3>
+    <p id="dataStatus" class="muted">Aucune trace.</p>
     <label class="btn primary file">Charger un snapshot (.fwss)
       <input id="fileIn" type="file" accept=".fwss,application/zip,application/octet-stream" hidden>
     </label>
@@ -132,10 +144,10 @@
       </ol>
     </details>
 
-    <h3>Rues hors ligne</h3>
+    <h3>Cartes gardées sur ce téléphone</h3>
     <p class="muted small" id="dataInfo">…</p>
-    <button id="dlAll" class="btn primary" hidden>Tout télécharger</button>
-    <button id="prefetch" class="btn ghost small">Précharger seulement 5 km autour de moi</button>
+    <button id="dlAll" class="btn primary" hidden>Tout garder sur ce téléphone</button>
+    <button id="prefetch" class="btn ghost small">Garder seulement 5 km autour de moi</button>
 
     <h3>Réglages</h3>
     <div class="field"><label for="fogSel">Affichage de mes traces</label>
@@ -148,15 +160,28 @@
     <h3>Confidentialité</h3>
     <ul class="privacy">
       <li>Tes traces sont lues et analysées <b>uniquement sur cet appareil</b>. Elles ne sont envoyées nulle part et ne sont pas dans le code du site.</li>
-      <li>Les services de carte (OpenStreetMap, Overpass, Esri, geo.api.gouv.fr, Géoplateforme IGN) reçoivent seulement la zone affichée ou l'adresse tapée, comme n'importe quelle appli de carte. Ils voient aussi l'adresse du site (tbrapor-arch.github.io), jamais la page ni tes données.</li>
+      <li>Les rues, les gares et les limites des communes sont <b>gardées sur ce téléphone</b> : ouvrir ou chercher une commune, ou trouver celle où tu es, ne demande rien à aucun serveur.</li>
+      <li>Le fond de carte (Esri ou OpenStreetMap) et la recherche d'adresse (Géoplateforme IGN) reçoivent seulement la zone affichée ou l'adresse tapée, comme n'importe quelle appli de carte.</li>
+      <li>Ta position (bouton cible) reste dans cet appareil, elle sert seulement à te placer sur la carte.</li>
       <li>Dropbox : accès en lecture seule, jeton gardé dans ce navigateur.</li>
       <li>Aucune statistique, aucun cookie, aucun traceur.</li>
     </ul>
     <button id="wipe" class="btn danger">Effacer toutes mes données de cet appareil</button>
-    <p id="wipeConfirm" class="confirm" hidden>Sûr ? Tes traces, la connexion Dropbox et le cache seront supprimés de ce navigateur.
+    <p id="wipeConfirm" class="confirm" hidden>Sûr ? Tes traces, la connexion Dropbox et les cartes gardées seront supprimées de ce navigateur.
       <button id="wipeYes" class="btn danger small">Oui, effacer</button> <button id="wipeNo" class="btn ghost small">Annuler</button></p>
   </div>
 </section>
+
+<nav class="nav" role="tablist" aria-label="Sections">
+  <button role="tab" data-tab="commune" aria-selected="true">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" d="M4 20V9l5-4 5 4v11M14 20v-8h6v8M2.5 20h19"/><path d="M8 13h2M8 16.5h2"/></svg><span>Commune</span></button>
+  <button role="tab" data-tab="route">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="18.5" r="2.2" fill="none"/><circle cx="18" cy="5.5" r="2.2" fill="none"/><path fill="none" d="M8.2 18.5H15a3.5 3.5 0 000-7H9a3.5 3.5 0 010-7h6.8"/></svg><span>Itinéraire</span></button>
+  <button role="tab" data-tab="idf">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" d="M3.5 6.5l5.5-2 6 2 5.5-2v13l-5.5 2-6-2-5.5 2z"/><path d="M9 4.5v13M15 6.5v13"/></svg><span>Île-de-France</span></button>
+  <button role="tab" data-tab="data">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="3" fill="none"/><path fill="none" d="M4.5 6v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6M4.5 12v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/></svg><span>Données</span></button>
+</nav>
 
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/jszip.min.js"></script>

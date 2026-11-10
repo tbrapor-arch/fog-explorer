@@ -37,7 +37,7 @@ export class FogMap {
     const n = (data.length - HEADER) / BLOCK_BYTES;
     const tx = tileId % TILE_W, ty = Math.floor(tileId / TILE_W);
     const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    let added = 0;
+    let added = 0; this._count = undefined;
     for (let i = 0; i < BLOCK_W * BLOCK_W; i++) {
       const idx = dv.getUint16(i * 2, true);
       if (!idx) continue;
@@ -64,14 +64,27 @@ export class FogMap {
   near(lon, lat, r = 2) {
     const [gx, gy] = lonLatToPx(lon, lat);
     const x = Math.floor(gx), y = Math.floor(gy);
+    const x0 = x - r, x1 = x + r, y0 = y - r, y1 = y + r;
+    // usual case: the whole window is inside one block, so read its bitmap directly
+    if ((x0 >> 6) === (x1 >> 6) && (y0 >> 6) === (y1 >> 6)) {
+      const b = this.blocks.get((x0 >> 6) * 65536 + (y0 >> 6));
+      if (!b) return false;
+      const lx0 = x0 & 63, lx1 = x1 & 63;
+      for (let ly = y0 & 63, le = y1 & 63; ly <= le; ly++) {
+        const o = ly * 8;
+        for (let lx = lx0; lx <= lx1; lx++) if (b[o + (lx >> 3)] & (0x80 >> (lx & 7))) return true;
+      }
+      return false;
+    }
     for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) if (this.isSet(x + dx, y + dy)) return true;
     return false;
   }
 
   countPixels() {
+    if (this._count !== undefined) return this._count;
     let c = 0;
     for (const b of this.blocks.values()) for (let k = 0; k < 512; k++) { let v = b[k]; while (v) { v &= v - 1; c++; } }
-    return c;
+    return (this._count = c);
   }
 
   // compact serialization for IndexedDB
@@ -83,7 +96,7 @@ export class FogMap {
   }
   static deserialize({ keys, data }) {
     const f = new FogMap();
-    for (let i = 0; i < keys.length; i++) f.blocks.set(keys[i], data.slice(i * 512, i * 512 + 512));
+    for (let i = 0; i < keys.length; i++) f.blocks.set(keys[i], data.subarray(i * 512, i * 512 + 512)); // views, no copy
     return f;
   }
 }

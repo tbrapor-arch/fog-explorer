@@ -26,14 +26,22 @@ Fog of World mesure une surface dévoilée. Cette surface inclut les immeubles e
 
 - **Ce dépôt ne contient aucune donnée personnelle.** Seulement du code.
 - Tes traces sont décodées et analysées **dans ton navigateur**. Elles restent dans le stockage local de l'appareil (IndexedDB) et ne sont envoyées à aucun serveur.
+- Les rues, les gares et les **limites des communes** sont publiées avec l'appli (construites une fois par mois par `tools/`, à partir d'OpenStreetMap et de geo.api.gouv.fr) puis **gardées sur le téléphone**. Ouvrir une commune, en chercher une par son nom ou trouver celle où tu es ne demande rien à aucun serveur.
 - Services tiers appelés, sans tes traces :
-  - OpenStreetMap / Overpass : la zone affichée, pour récupérer les rues ;
   - Esri (gris clair) ou OpenStreetMap France : le fond de carte ;
-  - geo.api.gouv.fr : les limites des communes ;
-  - Géoplateforme IGN : la recherche d'adresse.
+  - Géoplateforme IGN : la recherche d'adresse ;
+  - Overpass et geo.api.gouv.fr : seulement en secours, si les données publiées avec l'appli sont absentes.
+- Le bouton « Ma position » place un point sur la carte. La position reste dans l'appareil et le GPS s'arrête quand l'appli passe en arrière-plan.
 - La synchro Dropbox est en lecture seule (OAuth PKCE, sans serveur ni secret). Le jeton reste dans ton navigateur.
 - Aucun traceur, aucun cookie, aucune police ou script externe. Leaflet et JSZip sont inclus dans `vendor/`.
 - Le bouton « Effacer toutes mes données » vide tout le stockage local et révoque le jeton Dropbox.
+
+## Fluidité
+
+- Tous les calculs lourds (croisement des rues et des traces, pourcentages, itinéraires, plus grand réseau) tournent dans un *worker* (`js/worker.js`) : la carte ne se fige plus pendant un calcul.
+- L'appli s'ouvre depuis son cache sans attendre le réseau. Une nouvelle version se télécharge en arrière-plan, puis l'appli propose de recharger.
+- Les rues d'une commune sont dessinées en trois tracés au lieu d'un par tronçon, et la carte des 1 300 communes en une forme par couleur.
+- Sur téléphone, le panneau se tire à trois hauteurs (réduit, moitié, plein écran). Réduit, il laisse toute la carte et garde le résumé en une ligne.
 
 ## Format Fog of World
 

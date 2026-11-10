@@ -1,4 +1,5 @@
-# Builds the Île-de-France street data from OpenStreetMap (public data, no personal data)
+# Builds the Île-de-France street data from OpenStreetMap and the commune limits from
+# geo.api.gouv.fr (public data, no personal data)
 # and publishes the app + data on GitHub Pages. Street data is rebuilt once a month.
 name: Publier l'appli et les rues
 on:
@@ -34,11 +35,23 @@ jobs:
           pip install osmium
           curl -fsSL -o idf.osm.pbf https://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf
           python tools/build_streets.py idf.osm.pbf streetdata
+      - name: Limites des communes du mois (cache)
+        id: ccache
+        uses: actions/cache@v4
+        with:
+          path: communedata
+          key: communes-idf-${{ steps.month.outputs.m }}-${{ hashFiles('tools/build_communes.py') }}
+      - name: Construire les limites des communes (geo.api.gouv.fr)
+        if: steps.ccache.outputs.cache-hit != 'true'
+        # sans ce fichier l'appli retombe sur l'API en direct : un échec ici ne bloque pas la publication
+        run: python tools/build_communes.py build communedata || { rm -rf communedata; echo "::warning::Limites des communes non construites, l'appli utilisera l'API en direct"; }
       - name: Assembler le site
         run: |
           mkdir -p _site
-          rsync -a --exclude '.git' --exclude '.github' --exclude 'tools' --exclude 'streetdata' --exclude 'idf.osm.pbf' --exclude '_site' ./ _site/
+          rsync -a --exclude '.git' --exclude '.github' --exclude 'tools' --exclude 'streetdata' --exclude 'communedata' --exclude 'idf.osm.pbf' --exclude '_site' ./ _site/
           mkdir -p _site/data && cp -r streetdata/* _site/data/
+          if [ -f communedata/communes.meta.json ]; then python tools/build_communes.py publish communedata _site/data; fi
+          sed -i "s/__BUILD__/${GITHUB_SHA::10}/" _site/sw.js
           du -sh _site/data
       - uses: actions/upload-pages-artifact@v3
         with:

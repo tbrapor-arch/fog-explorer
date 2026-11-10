@@ -108,6 +108,8 @@ export async function fetchStations([s, w, n, e]) {
   throw new Error('Gares indisponibles pour le moment (' + (last?.message || 'réseau') + ').');
 }
 
+export const km = m => (m / 1000).toLocaleString('fr-FR', { maximumFractionDigits: m < 10000 ? 1 : 0 }) + ' km';
+
 export function distM(lon1, lat1, lon2, lat2) {
   const R = 6371008.8, r = Math.PI / 180;
   const dLat = (lat2 - lat1) * r, dLon = (lon2 - lon1) * r;
